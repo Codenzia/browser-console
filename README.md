@@ -1,6 +1,10 @@
 # Browser Console
 
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-pink)](https://github.com/sponsors/codenzia)
+
 A web-based Artisan console, shell terminal, log viewer, and debug tool for Laravel — accessible from your browser, no database required.
+
+> **❤️ Sponsor this project** — If Browser Console saves you time, consider [sponsoring on GitHub](https://github.com/sponsors/codenzia) to support ongoing development.
 
 ## Features
 
