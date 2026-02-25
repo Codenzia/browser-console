@@ -27,7 +27,29 @@ class BrowserConsoleServiceProvider extends PackageServiceProvider
             ->hasInstallCommand(function (InstallCommand $command) {
                 $command
                     ->publishConfigFile()
-                    ->askToStarRepoOnGitHub('codenzia/browser-console');
+                    ->askToStarRepoOnGitHub('codenzia/browser-console')
+                    ->endWith(function (InstallCommand $cmd) {
+                        $cmd->newLine();
+                        $cmd->warn('  Diagnostics page (public/bcd.php)');
+                        $cmd->line('  This publishes a standalone diagnostics page for troubleshooting');
+                        $cmd->line('  deployment issues when Laravel cannot boot.');
+                        $cmd->line('  It is protected by your BROWSER_CONSOLE_PASSWORD.');
+                        $cmd->warn('  It exposes server info (PHP version, extensions, permissions).');
+                        $cmd->newLine();
+
+                        if ($cmd->confirm('Publish the diagnostics page to public/bcd.php?', true)) {
+                            $source = __DIR__ . '/../stubs/bcd.php';
+                            $destination = public_path('bcd.php');
+
+                            if (file_exists($source)) {
+                                copy($source, $destination);
+                                $cmd->info('  Diagnostics page published to public/bcd.php');
+                                $cmd->line('  You can remove it later: php artisan browser-console:diagnose --remove');
+                            }
+                        } else {
+                            $cmd->line('  Skipped. You can publish it later: php artisan browser-console:diagnose --refresh');
+                        }
+                    });
             });
     }
 
@@ -49,11 +71,6 @@ class BrowserConsoleServiceProvider extends PackageServiceProvider
         /** @var Router $router */
         $router = $this->app->make(Router::class);
         $router->prependMiddlewareToGroup('web', ForceFileSession::class);
-
-        // Publish the standalone diagnostics page
-        $this->publishes([
-            __DIR__ . '/../stubs/bcd.php' => public_path('bcd.php'),
-        ], 'browser-console-diagnostics');
     }
 
     protected function registerRoutes(): void

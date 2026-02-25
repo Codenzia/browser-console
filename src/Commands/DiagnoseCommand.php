@@ -9,15 +9,15 @@ use Illuminate\Console\Command;
 class DiagnoseCommand extends Command
 {
     protected $signature = 'browser-console:diagnose
-        {--publish : Publish the diagnostics page to public/bcd.php}
+        {--refresh : Force-refresh the diagnostics page in public/bcd.php}
         {--remove : Remove the diagnostics page from public/}';
 
-    protected $description = 'Run deployment diagnostics or publish/remove the web diagnostics page';
+    protected $description = 'Run deployment diagnostics or manage the web diagnostics page';
 
     public function handle(): int
     {
-        if ($this->option('publish')) {
-            return $this->publishDiagnostics();
+        if ($this->option('refresh')) {
+            return $this->refreshDiagnostics();
         }
 
         if ($this->option('remove')) {
@@ -27,7 +27,7 @@ class DiagnoseCommand extends Command
         return $this->runDiagnostics();
     }
 
-    private function publishDiagnostics(): int
+    private function refreshDiagnostics(): int
     {
         $source = dirname(__DIR__, 2) . '/stubs/bcd.php';
         $destination = public_path('bcd.php');
@@ -40,14 +40,9 @@ class DiagnoseCommand extends Command
 
         copy($source, $destination);
 
-        $path = config('browser-console.path', 'console');
-
         $this->info('');
-        $this->info('  Diagnostics page published.');
+        $this->info('  Diagnostics page refreshed.');
         $this->info("  Access at: {$this->getLaravel()->make('url')->to('bcd.php')}");
-        $this->info('');
-        $this->warn('  Remember to remove it after diagnosing:');
-        $this->warn('  php artisan browser-console:diagnose --remove');
         $this->info('');
 
         return self::SUCCESS;
@@ -100,11 +95,16 @@ class DiagnoseCommand extends Command
         }
 
         $writables = [
+            'storage',
+            'storage/app',
+            'storage/app/public',
+            'storage/framework',
             'storage/framework/sessions',
             'storage/framework/views',
             'storage/framework/cache',
             'storage/logs',
             'bootstrap/cache',
+            'public',
         ];
 
         foreach ($writables as $dir) {

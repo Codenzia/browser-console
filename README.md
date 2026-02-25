@@ -212,40 +212,55 @@ php artisan browser-console:show --verify
 # Run deployment diagnostics from CLI
 php artisan browser-console:diagnose
 
-# Publish web diagnostics page (for debugging 500 errors remotely)
-php artisan browser-console:diagnose --publish
+# Force-refresh the web diagnostics page (public/bcd.php)
+php artisan browser-console:diagnose --refresh
 
-# Remove the diagnostics page when done
+# Remove the diagnostics page from public/
 php artisan browser-console:diagnose --remove
 ```
 
 ## Troubleshooting
 
-If you get a **500 error** after deploying, use the built-in diagnostics page to find the exact cause.
+If `/console` returns a **500 error** or doesn't load after deploying, use the built-in diagnostics page (`bcd.php`) to find the exact cause.
 
-### Option A: Via Artisan (if you have SSH)
+### Diagnostics Page (bcd.php)
+
+During installation (`php artisan browser-console:install`), you'll be asked whether to publish the diagnostics page to `public/bcd.php`. It works without Laravel — even when the framework itself fails to start.
+
+Visit `https://your-domain.com/bcd.php` and authenticate with your console password.
+
+The page checks:
+- **PHP Environment** — Version, required extensions, `proc_open()` availability
+- **Laravel Structure** — `.env`, `APP_KEY`, vendor directory, config/route caches
+- **File Permissions** — `storage/`, `bootstrap/cache/`, `public/`, and all subdirectories
+- **Browser Console Package** — Installation, config, credentials, Livewire, `.htaccess`
+- **Laravel Boot Test** — Attempts to bootstrap Laravel and shows the exact exception
+
+> **Authentication:** The diagnostics page requires the `BROWSER_CONSOLE_PASSWORD` from your `.env` file. If no password is set, the page is locked entirely.
+
+### CLI Diagnostics
+
+If you have SSH access, run the same checks from the terminal:
 
 ```bash
-php artisan browser-console:diagnose --publish
+php artisan browser-console:diagnose
 ```
 
-Then visit `https://your-domain.com/bcd.php` in your browser.
-
-### Option B: Manual (no SSH / Laravel broken)
-
-Copy the diagnostics file to your public directory:
+### Managing bcd.php
 
 ```bash
-cp vendor/codenzia/browser-console/stubs/bcd.php public/bcd.php
+# Force-refresh with the latest version from the package
+php artisan browser-console:diagnose --refresh
+
+# Remove from public/ when no longer needed
+php artisan browser-console:diagnose --remove
 ```
 
-Or use your hosting panel's file manager to copy `vendor/codenzia/browser-console/stubs/bcd.php` into `public/`.
+To publish it later (or re-publish after removal):
 
-Then visit `https://your-domain.com/bcd.php`.
-
-The diagnostics page checks PHP version, extensions, directory permissions, `.env` configuration, and package installation — all without requiring Laravel to boot. Click **"Run Boot Test"** to see the exact exception causing the 500 error.
-
-> **Important:** Delete `bcd.php` after diagnosing — it exposes server information.
+```bash
+php artisan browser-console:diagnose --refresh
+```
 
 ## How It Works
 

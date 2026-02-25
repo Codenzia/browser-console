@@ -9,8 +9,8 @@
 | deployment issues. This file has ZERO Laravel dependencies and works
 | even when the framework fails to boot.
 |
-| SECURITY: Delete this file after diagnosing your issue.
-|           Run: php artisan browser-console:diagnose --remove
+| Access is protected by the BROWSER_CONSOLE_PASSWORD from .env.
+| If no password is configured, the page is locked entirely.
 |
 | Part of: codenzia/browser-console
 |
@@ -18,6 +18,8 @@
 
 header('Cache-Control: no-store, no-cache, must-revalidate');
 header('X-Robots-Tag: noindex, nofollow');
+header('X-Content-Type-Options: nosniff');
+header('X-Frame-Options: DENY');
 header('Content-Type: text/html; charset=utf-8');
 
 // --- Detect Laravel root ---
@@ -36,6 +38,111 @@ foreach ($candidates as $candidate) {
     }
 }
 
+// --- Parse .env for authentication ---
+$envPasswordHash = null;
+
+if ($basePath && file_exists($basePath . '/.env')) {
+    $envContent = file_get_contents($basePath . '/.env');
+
+    if (preg_match('/^BROWSER_CONSOLE_PASSWORD=(.+)$/m', $envContent, $m)) {
+        $envPasswordHash = trim($m[1]);
+    }
+}
+
+// --- Authentication gate (PHP native sessions, no Laravel) ---
+session_name('bcd_diagnostics');
+session_start();
+
+$authenticated = false;
+$authError = '';
+
+if ($envPasswordHash) {
+    // Handle logout
+    if (isset($_GET['logout'])) {
+        $_SESSION = [];
+        session_destroy();
+        header('Location: ' . strtok($_SERVER['REQUEST_URI'], '?'));
+
+        exit;
+    }
+
+    // Handle login attempt
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password'])) {
+        if (password_verify($_POST['password'], $envPasswordHash)) {
+            $_SESSION['bcd_authenticated'] = true;
+            $_SESSION['bcd_auth_time'] = time();
+            $authenticated = true;
+        } else {
+            $authError = 'Invalid password.';
+        }
+    }
+
+    // Check existing session (30-minute timeout)
+    if (! $authenticated && isset($_SESSION['bcd_authenticated'])) {
+        $elapsed = time() - ($_SESSION['bcd_auth_time'] ?? 0);
+        if ($elapsed < 1800) {
+            $authenticated = true;
+        } else {
+            unset($_SESSION['bcd_authenticated'], $_SESSION['bcd_auth_time']);
+        }
+    }
+} else {
+    // No password configured — page is locked
+    $authenticated = false;
+}
+
+// --- If not authenticated, show login or locked page and exit ---
+if (! $authenticated) {
+    ?><!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex, nofollow">
+    <title>BCD - Locked</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0f172a; color: #e2e8f0; font-family: 'Courier New', monospace; font-size: 14px; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+        .card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 32px; max-width: 400px; width: 100%; }
+        .card h1 { font-size: 16px; color: #38bdf8; margin-bottom: 4px; }
+        .card .sub { color: #64748b; font-size: 12px; margin-bottom: 20px; }
+        .card input { width: 100%; background: #0f172a; border: 1px solid #334155; border-radius: 6px; padding: 10px 14px; color: #e2e8f0; font-family: inherit; font-size: 14px; margin-bottom: 12px; outline: none; }
+        .card input:focus { border-color: #38bdf8; }
+        .card button { width: 100%; background: #1d4ed8; color: #fff; border: none; border-radius: 6px; padding: 10px; font-family: inherit; font-size: 14px; cursor: pointer; }
+        .card button:hover { background: #2563eb; }
+        .error { color: #f87171; font-size: 12px; margin-bottom: 12px; }
+        .locked { color: #94a3b8; font-size: 13px; text-align: center; }
+    </style>
+</head>
+<body>
+<div class="card">
+    <h1>Browser Console Diagnostics</h1>
+    <div class="sub">codenzia/browser-console</div>
+    <?php if ($envPasswordHash): ?>
+        <?php if ($authError): ?>
+            <div class="error"><?= htmlspecialchars($authError) ?></div>
+        <?php endif; ?>
+        <form method="POST">
+            <input type="password" name="password" placeholder="Console password" required autofocus>
+            <button type="submit">Authenticate</button>
+        </form>
+    <?php else: ?>
+        <p class="locked">
+            Diagnostics locked.<br><br>
+            Set BROWSER_CONSOLE_PASSWORD in .env<br>
+            to enable access.
+        </p>
+    <?php endif; ?>
+</div>
+</body>
+</html><?php
+    exit;
+}
+
+// =====================================================================
+//  AUTHENTICATED — Run diagnostics below
+// =====================================================================
+
 // --- Helper functions ---
 function bc_check(string $label, bool $pass, string $detail = '', string $fix = ''): array
 {
@@ -48,17 +155,18 @@ function bc_check_writable(string $path, string $label): array
         return bc_check($label, false, 'Missing', "mkdir -p {$label} && chmod 775 {$label}");
     }
     if (! is_writable($path)) {
-        return bc_check($label, false, 'Not writable (perms: ' . substr(sprintf('%o', fileperms($path)), -4) . ')', "chmod -R 775 {$label}");
+        return bc_check($label, false, 'Not writable', "chmod -R 775 {$label}");
     }
 
-    return bc_check($label, true, 'Writable (' . substr(sprintf('%o', fileperms($path)), -4) . ')');
+    return bc_check($label, true, 'Writable');
 }
 
 // ================================================================
 //  Section 1: PHP Environment
 // ================================================================
 $php = [];
-$php[] = bc_check('PHP Version >= 8.2', version_compare(PHP_VERSION, '8.2.0', '>='), PHP_VERSION, 'Upgrade PHP to 8.2+');
+$phpVersionOk = version_compare(PHP_VERSION, '8.2.0', '>=');
+$php[] = bc_check('PHP Version >= 8.2', $phpVersionOk, PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION . '.x', 'Upgrade PHP to 8.2+');
 $php[] = bc_check('SAPI', true, php_sapi_name());
 $php[] = bc_check('Memory Limit', true, ini_get('memory_limit'));
 $php[] = bc_check('Max Execution Time', true, ini_get('max_execution_time') . 's');
@@ -83,14 +191,12 @@ $structure = [];
 if (! $basePath) {
     $structure[] = bc_check('Laravel Root', false, 'Could not find artisan + bootstrap/app.php', 'Ensure this file is inside Laravel\'s public/ directory');
 } else {
-    $structure[] = bc_check('Laravel Root', true, $basePath);
+    $structure[] = bc_check('Laravel Root', true, 'Detected');
 
     $envExists = file_exists($basePath . '/.env');
     $structure[] = bc_check('.env', $envExists, $envExists ? 'Found' : 'MISSING', 'cp .env.example .env && php artisan key:generate');
 
     if ($envExists) {
-        $envContent = file_get_contents($basePath . '/.env');
-
         $hasAppKey = (bool) preg_match('/^APP_KEY=base64:.+$/m', $envContent);
         $structure[] = bc_check('APP_KEY', $hasAppKey, $hasAppKey ? 'Set' : 'Empty or missing', 'php artisan key:generate');
 
@@ -114,12 +220,15 @@ if (! $basePath) {
     // Writable directories
     $writables = [
         'storage'                    => '/storage',
+        'storage/app'                => '/storage/app',
+        'storage/app/public'         => '/storage/app/public',
         'storage/framework'          => '/storage/framework',
         'storage/framework/sessions' => '/storage/framework/sessions',
         'storage/framework/views'    => '/storage/framework/views',
         'storage/framework/cache'    => '/storage/framework/cache',
         'storage/logs'               => '/storage/logs',
         'bootstrap/cache'            => '/bootstrap/cache',
+        'public'                     => '/public',
     ];
     foreach ($writables as $label => $dir) {
         $structure[] = bc_check_writable($basePath . $dir, $label);
@@ -128,8 +237,7 @@ if (! $basePath) {
     // storage/app symlink check
     $publicStorage = $basePath . '/public/storage';
     if (is_link($publicStorage)) {
-        $target = readlink($publicStorage);
-        $structure[] = bc_check('public/storage symlink', true, "-> {$target}");
+        $structure[] = bc_check('public/storage symlink', true, 'Linked');
     } else {
         $structure[] = bc_check('public/storage symlink', true, 'Not created (optional: php artisan storage:link)');
     }
@@ -142,19 +250,17 @@ $package = [];
 
 if ($basePath) {
     $pkgInstalled = is_dir($basePath . '/vendor/codenzia/browser-console');
-    $package[] = bc_check('Package installed', $pkgInstalled, $pkgInstalled ? 'vendor/codenzia/browser-console' : 'NOT FOUND', 'composer require codenzia/browser-console');
+    $package[] = bc_check('Package installed', $pkgInstalled, $pkgInstalled ? 'Found' : 'NOT FOUND', 'composer require codenzia/browser-console');
 
     $configPublished = file_exists($basePath . '/config/browser-console.php');
-    $package[] = bc_check('Config published', $configPublished, $configPublished ? 'config/browser-console.php' : 'NOT PUBLISHED', 'php artisan vendor:publish --tag=browser-console-config');
+    $package[] = bc_check('Config published', $configPublished, $configPublished ? 'Found' : 'NOT PUBLISHED', 'php artisan vendor:publish --tag=browser-console-config');
 
     if (file_exists($basePath . '/.env')) {
-        $envContent = $envContent ?? file_get_contents($basePath . '/.env');
-
         $hasUser = (bool) preg_match('/^BROWSER_CONSOLE_USER=.+$/m', $envContent);
-        $package[] = bc_check('BROWSER_CONSOLE_USER', $hasUser, $hasUser ? 'Set (value hidden)' : 'NOT SET', 'php artisan browser-console:create');
+        $package[] = bc_check('BROWSER_CONSOLE_USER', $hasUser, $hasUser ? 'Set' : 'NOT SET', 'php artisan browser-console:create');
 
         $hasPass = (bool) preg_match('/^BROWSER_CONSOLE_PASSWORD=\$.+$/m', $envContent);
-        $package[] = bc_check('BROWSER_CONSOLE_PASSWORD', $hasPass, $hasPass ? 'Set (value hidden)' : 'NOT SET', 'php artisan browser-console:create');
+        $package[] = bc_check('BROWSER_CONSOLE_PASSWORD', $hasPass, $hasPass ? 'Set' : 'NOT SET', 'php artisan browser-console:create');
     }
 
     $lwInstalled = is_dir($basePath . '/vendor/livewire/livewire');
@@ -204,9 +310,11 @@ if ($bootRequested && $basePath && file_exists($basePath . '/vendor/autoload.php
         }
     } catch (\Throwable $e) {
         $bootError = get_class($e) . ': ' . $e->getMessage();
+
+        // Show relative paths only — never expose absolute server paths
         $bootErrorFile = str_replace($basePath . '/', '', $e->getFile()) . ':' . $e->getLine();
 
-        // Collect the trace (first 5 frames, relative paths)
+        // Collect the trace (first 5 frames, relative paths only)
         $trace = [];
         foreach (array_slice($e->getTrace(), 0, 5) as $frame) {
             $file = isset($frame['file']) ? str_replace($basePath . '/', '', $frame['file']) : '(internal)';
@@ -248,11 +356,12 @@ $statusText = $totalFails === 0 ? 'ALL CHECKS PASSED' : "{$totalFails} ISSUE(S) 
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { background: #0f172a; color: #e2e8f0; font-family: 'Courier New', monospace; font-size: 14px; padding: 20px; line-height: 1.6; }
         .container { max-width: 900px; margin: 0 auto; }
-        .header { border: 1px solid #334155; border-radius: 8px; padding: 20px; margin-bottom: 20px; background: #1e293b; }
-        .header h1 { font-size: 18px; color: #38bdf8; margin-bottom: 4px; }
-        .header .sub { color: #94a3b8; font-size: 12px; }
-        .warning { background: #451a03; border: 1px solid #92400e; border-radius: 6px; padding: 12px 16px; margin-bottom: 20px; color: #fbbf24; font-size: 12px; }
+        .header { border: 1px solid #334155; border-radius: 8px; padding: 20px; margin-bottom: 20px; background: #1e293b; display: flex; justify-content: space-between; align-items: flex-start; }
+        .header-left h1 { font-size: 18px; color: #38bdf8; margin-bottom: 4px; }
+        .header-left .sub { color: #94a3b8; font-size: 12px; }
         .status { display: inline-block; padding: 4px 12px; border-radius: 4px; font-weight: bold; font-size: 13px; margin-top: 8px; }
+        .logout { color: #64748b; font-size: 12px; text-decoration: none; border: 1px solid #334155; padding: 6px 12px; border-radius: 4px; }
+        .logout:hover { color: #e2e8f0; border-color: #475569; }
         .section { border: 1px solid #334155; border-radius: 8px; margin-bottom: 16px; overflow: hidden; }
         .section-title { background: #1e293b; padding: 10px 16px; font-size: 13px; color: #38bdf8; border-bottom: 1px solid #334155; font-weight: bold; }
         .row { display: flex; padding: 6px 16px; border-bottom: 1px solid #1e293b; align-items: baseline; }
@@ -264,7 +373,6 @@ $statusText = $totalFails === 0 ? 'ALL CHECKS PASSED' : "{$totalFails} ISSUE(S) 
         .label { width: 280px; flex-shrink: 0; color: #cbd5e1; }
         .detail { flex: 1; color: #94a3b8; font-size: 13px; }
         .fix { color: #f59e0b; font-size: 12px; margin-left: 8px; }
-        .boot-section { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
         .boot-btn { display: inline-block; background: #1d4ed8; color: #fff; padding: 8px 20px; border-radius: 6px; text-decoration: none; font-family: inherit; font-size: 13px; border: none; cursor: pointer; }
         .boot-btn:hover { background: #2563eb; }
         .boot-ok { background: #052e16; border: 1px solid #166534; border-radius: 6px; padding: 12px 16px; color: #4ade80; margin-top: 10px; }
@@ -281,16 +389,14 @@ $statusText = $totalFails === 0 ? 'ALL CHECKS PASSED' : "{$totalFails} ISSUE(S) 
 <div class="container">
 
     <div class="header">
-        <h1>Browser Console - Deployment Diagnostics</h1>
-        <div class="sub">codenzia/browser-console &middot; <?= date('Y-m-d H:i:s T') ?></div>
-        <div class="status" style="background: <?= $statusColor ?>20; color: <?= $statusColor ?>; border: 1px solid <?= $statusColor ?>;">
-            <?= $statusText ?>
+        <div class="header-left">
+            <h1>Browser Console - Deployment Diagnostics</h1>
+            <div class="sub">codenzia/browser-console &middot; <?= date('Y-m-d H:i:s T') ?></div>
+            <div class="status" style="background: <?= $statusColor ?>20; color: <?= $statusColor ?>; border: 1px solid <?= $statusColor ?>;">
+                <?= $statusText ?>
+            </div>
         </div>
-    </div>
-
-    <div class="warning">
-        &#9888; SECURITY: Delete this file after diagnosing. It exposes server information.<br>
-        Run: <strong>php artisan browser-console:diagnose --remove</strong> &nbsp;or&nbsp; manually delete <strong>public/bcd.php</strong>
+        <a href="?logout" class="logout">Logout</a>
     </div>
 
     <?php

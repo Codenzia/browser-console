@@ -88,3 +88,76 @@ it('show command rejects incorrect password', function () {
         ->expectsOutputToContain('incorrect')
         ->assertFailed();
 });
+
+it('diagnose command runs successfully', function () {
+    $this->artisan('browser-console:diagnose')
+        ->expectsOutputToContain('Deployment Diagnostics')
+        ->assertExitCode(0);
+});
+
+it('diagnose command registers the diagnose command', function () {
+    expect(array_keys(\Artisan::all()))
+        ->toContain('browser-console:diagnose');
+});
+
+it('diagnose --refresh copies bcd.php to public', function () {
+    $destination = public_path('bcd.php');
+
+    // Clean up if leftover
+    if (file_exists($destination)) {
+        unlink($destination);
+    }
+
+    $this->artisan('browser-console:diagnose --refresh')
+        ->expectsOutputToContain('refreshed')
+        ->assertSuccessful();
+
+    expect(file_exists($destination))->toBeTrue();
+
+    // Clean up
+    unlink($destination);
+});
+
+it('diagnose --refresh overwrites existing bcd.php', function () {
+    $destination = public_path('bcd.php');
+
+    if (! is_dir(dirname($destination))) {
+        mkdir(dirname($destination), 0755, true);
+    }
+    file_put_contents($destination, '<?php // old version');
+
+    $this->artisan('browser-console:diagnose --refresh')
+        ->assertSuccessful();
+
+    expect(file_get_contents($destination))->not->toBe('<?php // old version');
+
+    // Clean up
+    unlink($destination);
+});
+
+it('diagnose --remove deletes bcd.php from public', function () {
+    $destination = public_path('bcd.php');
+
+    if (! is_dir(dirname($destination))) {
+        mkdir(dirname($destination), 0755, true);
+    }
+    file_put_contents($destination, '<?php // diagnostics');
+
+    $this->artisan('browser-console:diagnose --remove')
+        ->expectsOutputToContain('removed')
+        ->assertSuccessful();
+
+    expect(file_exists($destination))->toBeFalse();
+});
+
+it('diagnose --remove handles missing file gracefully', function () {
+    $destination = public_path('bcd.php');
+
+    if (file_exists($destination)) {
+        unlink($destination);
+    }
+
+    $this->artisan('browser-console:diagnose --remove')
+        ->expectsOutputToContain('not found')
+        ->assertSuccessful();
+});

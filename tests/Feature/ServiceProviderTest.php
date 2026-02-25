@@ -46,7 +46,8 @@ it('loads package config with defaults', function () {
 it('registers artisan commands', function () {
     expect(array_keys(\Artisan::all()))
         ->toContain('browser-console:create')
-        ->toContain('browser-console:show');
+        ->toContain('browser-console:show')
+        ->toContain('browser-console:diagnose');
 });
 
 it('prepends ForceFileSession middleware to web group', function () {
@@ -54,4 +55,19 @@ it('prepends ForceFileSession middleware to web group', function () {
     $middlewareGroups = $router->getMiddlewareGroups();
 
     expect($middlewareGroups['web'])->toContain(ForceFileSession::class);
+});
+
+it('does not auto-publish bcd.php on boot', function () {
+    $destination = public_path('bcd.php');
+
+    // Ensure no leftover from previous tests
+    if (file_exists($destination)) {
+        unlink($destination);
+    }
+
+    $provider = new \Codenzia\BrowserConsole\BrowserConsoleServiceProvider(app());
+    $provider->packageBooted();
+
+    // bcd.php should NOT be auto-published — it's opt-in during install
+    expect(file_exists($destination))->toBeFalse();
 });
