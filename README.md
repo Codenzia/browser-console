@@ -208,7 +208,44 @@ php artisan browser-console:create
 # Show current username and verify password
 php artisan browser-console:show
 php artisan browser-console:show --verify
+
+# Run deployment diagnostics from CLI
+php artisan browser-console:diagnose
+
+# Publish web diagnostics page (for debugging 500 errors remotely)
+php artisan browser-console:diagnose --publish
+
+# Remove the diagnostics page when done
+php artisan browser-console:diagnose --remove
 ```
+
+## Troubleshooting
+
+If you get a **500 error** after deploying, use the built-in diagnostics page to find the exact cause.
+
+### Option A: Via Artisan (if you have SSH)
+
+```bash
+php artisan browser-console:diagnose --publish
+```
+
+Then visit `https://your-domain.com/bcd.php` in your browser.
+
+### Option B: Manual (no SSH / Laravel broken)
+
+Copy the diagnostics file to your public directory:
+
+```bash
+cp vendor/codenzia/browser-console/stubs/bcd.php public/bcd.php
+```
+
+Or use your hosting panel's file manager to copy `vendor/codenzia/browser-console/stubs/bcd.php` into `public/`.
+
+Then visit `https://your-domain.com/bcd.php`.
+
+The diagnostics page checks PHP version, extensions, directory permissions, `.env` configuration, and package installation — all without requiring Laravel to boot. Click **"Run Boot Test"** to see the exact exception causing the 500 error.
+
+> **Important:** Delete `bcd.php` after diagnosing — it exposes server information.
 
 ## How It Works
 

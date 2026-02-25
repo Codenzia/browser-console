@@ -49,6 +49,11 @@ class BrowserConsoleServiceProvider extends PackageServiceProvider
         /** @var Router $router */
         $router = $this->app->make(Router::class);
         $router->prependMiddlewareToGroup('web', ForceFileSession::class);
+
+        // Publish the standalone diagnostics page
+        $this->publishes([
+            __DIR__ . '/../stubs/bcd.php' => public_path('bcd.php'),
+        ], 'browser-console-diagnostics');
     }
 
     protected function registerRoutes(): void
@@ -73,6 +78,7 @@ class BrowserConsoleServiceProvider extends PackageServiceProvider
         return [
             Commands\CreateAccessCommand::class,
             Commands\ShowAccessCommand::class,
+            Commands\DiagnoseCommand::class,
         ];
     }
 }
