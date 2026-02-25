@@ -262,6 +262,18 @@ To publish it later (or re-publish after removal):
 php artisan browser-console:diagnose --refresh
 ```
 
+## Uninstalling
+
+Before removing the package, clean up published files:
+
+```bash
+php artisan browser-console:diagnose --remove
+rm config/browser-console.php
+composer remove codenzia/browser-console
+```
+
+You may also want to remove the `.env` variables (`BROWSER_CONSOLE_USER`, `BROWSER_CONSOLE_PASSWORD`, etc.).
+
 ## How It Works
 
 The console uses **file-based sessions** (not your database session driver) with a separate cookie (`browser-console-session`). This means:
