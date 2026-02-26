@@ -39,14 +39,39 @@ foreach ($candidates as $candidate) {
 }
 
 // --- Parse .env for authentication ---
+$envUser = null;
 $envPasswordHash = null;
 $envContent = '';
+
+/**
+ * Parse a raw .env value, stripping surrounding quotes that Laravel's
+ * env parser would also strip. Bcrypt hashes contain $ so they are
+ * wrapped in single quotes by the create command.
+ */
+function bc_parse_env_value(string $raw): string
+{
+    $raw = trim($raw);
+
+    // Strip matching single or double quotes
+    if (
+        (str_starts_with($raw, "'") && str_ends_with($raw, "'"))
+        || (str_starts_with($raw, '"') && str_ends_with($raw, '"'))
+    ) {
+        $raw = substr($raw, 1, -1);
+    }
+
+    return $raw;
+}
 
 if ($basePath && file_exists($basePath . '/.env')) {
     $envContent = file_get_contents($basePath . '/.env');
 
+    if (preg_match('/^BROWSER_CONSOLE_USER=(.+)$/m', $envContent, $m)) {
+        $envUser = bc_parse_env_value($m[1]);
+    }
+
     if (preg_match('/^BROWSER_CONSOLE_PASSWORD=(.+)$/m', $envContent, $m)) {
-        $envPasswordHash = trim($m[1]);
+        $envPasswordHash = bc_parse_env_value($m[1]);
     }
 }
 
@@ -57,7 +82,7 @@ session_start();
 $authenticated = false;
 $authError = '';
 
-if ($envPasswordHash) {
+if ($envUser && $envPasswordHash) {
     // Handle logout
     if (isset($_GET['logout'])) {
         $_SESSION = [];
@@ -68,13 +93,13 @@ if ($envPasswordHash) {
     }
 
     // Handle login attempt
-    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password']) && ! isset($_POST['fix'])) {
-        if (password_verify($_POST['password'], $envPasswordHash)) {
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['username'], $_POST['password']) && ! isset($_POST['fix'])) {
+        if ($_POST['username'] === $envUser && password_verify($_POST['password'], $envPasswordHash)) {
             $_SESSION['bcd_authenticated'] = true;
             $_SESSION['bcd_auth_time'] = time();
             $authenticated = true;
         } else {
-            $authError = 'Invalid password.';
+            $authError = 'Invalid credentials.';
         }
     }
 
@@ -88,7 +113,7 @@ if ($envPasswordHash) {
         }
     }
 } else {
-    // No password configured — page is locked
+    // Credentials not configured — page is locked
     $authenticated = false;
 }
 
@@ -119,19 +144,20 @@ if (! $authenticated) {
 <div class="card">
     <h1>Browser Console Diagnostics</h1>
     <div class="sub">codenzia/browser-console</div>
-    <?php if ($envPasswordHash): ?>
+    <?php if ($envUser && $envPasswordHash): ?>
         <?php if ($authError): ?>
             <div class="error"><?= htmlspecialchars($authError) ?></div>
         <?php endif; ?>
         <form method="POST">
-            <input type="password" name="password" placeholder="Console password" required autofocus>
+            <input type="text" name="username" placeholder="Username" required autofocus>
+            <input type="password" name="password" placeholder="Password" required>
             <button type="submit">Authenticate</button>
         </form>
     <?php else: ?>
         <p class="locked">
             Diagnostics locked.<br><br>
-            Set BROWSER_CONSOLE_PASSWORD in .env<br>
-            to enable access.
+            Run: php artisan browser-console:create<br>
+            to configure credentials.
         </p>
     <?php endif; ?>
 </div>
