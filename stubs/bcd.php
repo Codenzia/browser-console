@@ -621,11 +621,8 @@ if ($basePath) {
     $package[] = bc_check('Config published', $configPublished, $configPublished ? 'Found' : 'NOT PUBLISHED', 'php artisan vendor:publish --tag=browser-console-config');
 
     if ($envContent) {
-        $hasUser = (bool) preg_match('/^BROWSER_CONSOLE_USER=.+$/m', $envContent);
-        $package[] = bc_check('BROWSER_CONSOLE_USER', $hasUser, $hasUser ? 'Set' : 'NOT SET', 'php artisan browser-console:create');
-
-        $hasPass = (bool) preg_match('/^BROWSER_CONSOLE_PASSWORD=\$.+$/m', $envContent);
-        $package[] = bc_check('BROWSER_CONSOLE_PASSWORD', $hasPass, $hasPass ? 'Set' : 'NOT SET', 'php artisan browser-console:create');
+        $package[] = bc_check('BROWSER_CONSOLE_USER', ! empty($envUser), $envUser ? 'Set' : 'NOT SET', 'php artisan browser-console:create');
+        $package[] = bc_check('BROWSER_CONSOLE_PASSWORD', ! empty($envPasswordHash), $envPasswordHash ? 'Set' : 'NOT SET', 'php artisan browser-console:create');
     }
 
     $lwInstalled = is_dir($basePath . '/vendor/livewire/livewire');
