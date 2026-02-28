@@ -21,7 +21,8 @@ class ForceFileSession
         $path = config('browser-console.path', 'console');
         $isConsole = $request->is($path);
         $isLivewireFromConsole = $request->is('livewire/*')
-            && str_contains($request->header('Referer', ''), '/' . $path);
+            && ($request->cookies->has('browser-console-session')
+                || str_contains($request->header('Referer', ''), '/' . $path));
 
         if ($isConsole || $isLivewireFromConsole) {
             // Optional IP whitelisting — empty/null means allow all
