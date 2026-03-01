@@ -646,9 +646,15 @@ class BrowserConsole extends Component
 
             $process = Process::fromShellCommandline($input, base_path());
             $process->setTimeout($timeout);
+
+            // Extend PATH with common binary locations so subprocesses (git, node, etc.)
+            // are discoverable even when PHP-FPM has a minimal PATH.
+            $extraPaths = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+            $currentPath = getenv('PATH') ?: '';
             $process->setEnv([
                 'GIT_TERMINAL_PROMPT' => '0',
                 'COMPOSER_NO_INTERACTION' => '1',
+                'PATH' => $currentPath ? $currentPath . ':' . $extraPaths : $extraPaths,
             ]);
 
             // Stream output in real-time using Livewire's streaming
