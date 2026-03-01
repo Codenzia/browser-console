@@ -21,7 +21,7 @@ class ForceFileSession
         $path = config('browser-console.path', 'console');
         $isConsole = $request->is($path);
         $isLivewireFromConsole = $request->is('livewire/*')
-            && ($request->header('X-Browser-Console') === '1'
+            && (str_contains((string) $request->getContent(), 'browser-console')
                 || $request->cookies->has('browser-console-session')
                 || str_contains($request->header('Referer', ''), '/' . $path));
 

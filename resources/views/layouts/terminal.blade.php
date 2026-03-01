@@ -50,16 +50,6 @@
     {{ $slot }}
 
     @livewireScripts
-    <script>
-        // Tag every Livewire XHR so ForceFileSession can detect console requests
-        // even when the browser-console-session cookie or Referer header is
-        // stripped by a reverse proxy (common on CloudPanel / Nginx VPS setups).
-        document.addEventListener('livewire:init', () => {
-            Livewire.hook('request', ({ options }) => {
-                options.headers['X-Browser-Console'] = '1';
-            });
-        });
-    </script>
 </body>
 
 </html>
