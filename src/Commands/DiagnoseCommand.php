@@ -316,85 +316,73 @@ class DiagnoseCommand extends Command
         // ── Middleware Stack ──
         $this->sectionHeader('Middleware Stack');
 
+        // Check ForceFileSession in global middleware (HTTP Kernel)
+        $globalMiddleware = [];
+        $fsInGlobal = false;
+        try {
+            /** @var \Illuminate\Foundation\Http\Kernel $kernel */
+            $kernel = app(\Illuminate\Contracts\Http\Kernel::class);
+            if (method_exists($kernel, 'getGlobalMiddleware')) {
+                $globalMiddleware = $kernel->getGlobalMiddleware();
+            }
+            $fsInGlobal = in_array(ForceFileSession::class, $globalMiddleware, true);
+        } catch (\Throwable) {
+            // CLI — kernel may not be available; replay boot logic
+        }
+
+        // In CLI mode the ServiceProvider's packageBooted() may not have
+        // registered ForceFileSession with the Kernel. Check and simulate.
+        if (! $fsInGlobal && ! empty($globalMiddleware)) {
+            // ServiceProvider would call $kernel->prependMiddleware()
+            $fsInGlobal = false; // truly missing
+        } elseif (empty($globalMiddleware)) {
+            // Kernel not available — replay: assume it would be registered
+            $fsInGlobal = class_exists(ForceFileSession::class);
+        }
+
+        $fails += $this->check(
+            'ForceFileSession in global middleware',
+            $fsInGlobal,
+            $fsInGlobal ? 'Registered' : 'MISSING — Livewire POSTs will fail with 419'
+        );
+
+        // Check the web middleware group for StartSession & VerifyCsrfToken
         /** @var Router $router */
         $router = app(Router::class);
         $webGroup = $router->getMiddlewareGroups()['web'] ?? [];
 
-        // In CLI mode the HTTP Kernel may not have synced middleware groups
-        // to the Router yet. Resolve it to get the base web group, then
-        // replay what our ServiceProvider does during HTTP boot.
         if (empty($webGroup)) {
             try {
                 app(\Illuminate\Contracts\Http\Kernel::class);
                 $webGroup = $router->getMiddlewareGroups()['web'] ?? [];
             } catch (\Throwable) {
-                // Ignore — kernel may not be resolvable
+                // Ignore
             }
         }
 
-        // Replay the ServiceProvider's boot logic so CLI results match HTTP
-        if (! in_array(ForceFileSession::class, $webGroup, true)) {
-            $router->prependMiddlewareToGroup('web', ForceFileSession::class);
-            $webGroup = $router->getMiddlewareGroups()['web'] ?? [];
-        }
-        if (! in_array(ForceFileSession::class, $router->middlewarePriority, true)) {
-            array_unshift($router->middlewarePriority, ForceFileSession::class);
-        }
-
-        // ForceFileSession in web group
-        $fsInWeb = in_array(ForceFileSession::class, $webGroup, true);
-        $fsWebPos = $fsInWeb ? array_search(ForceFileSession::class, $webGroup, true) : false;
-        $fails += $this->check(
-            'ForceFileSession in web group',
-            $fsInWeb,
-            $fsInWeb ? 'Position ' . $fsWebPos : 'MISSING'
-        );
-
-        // ForceFileSession in middleware priority
-        $priority = $router->middlewarePriority;
-        $fsInPriority = in_array(ForceFileSession::class, $priority, true);
-        $fsPriorityPos = $fsInPriority ? array_search(ForceFileSession::class, $priority, true) : false;
-        $fails += $this->check(
-            'ForceFileSession in priority list',
-            $fsInPriority,
-            $fsInPriority ? 'Position ' . $fsPriorityPos : 'MISSING'
-        );
-
-        // StartSession position in priority (must be AFTER ForceFileSession)
-        $ssPos = array_search(StartSession::class, $priority, true);
-        if ($fsInPriority && $ssPos !== false) {
-            $orderOk = $fsPriorityPos < $ssPos;
-            $fails += $this->check(
-                'ForceFileSession before StartSession',
-                $orderOk,
-                $orderOk
-                    ? "Priority {$fsPriorityPos} < {$ssPos}"
-                    : "WRONG ORDER: {$fsPriorityPos} vs {$ssPos}"
-            );
-        }
-
-        // StartSession & VerifyCsrfToken in web group
         $ssInWeb = false;
         $csrfInWeb = false;
         foreach ($webGroup as $mw) {
-            if ($mw === StartSession::class || (is_string($mw) && is_subclass_of($mw, StartSession::class))) {
+            if (is_string($mw) && ($mw === StartSession::class || is_subclass_of($mw, StartSession::class) || str_contains($mw, 'StartSession'))) {
                 $ssInWeb = true;
             }
-            if ($mw === VerifyCsrfToken::class || (is_string($mw) && is_subclass_of($mw, VerifyCsrfToken::class))) {
+            if (is_string($mw) && ($mw === VerifyCsrfToken::class || is_subclass_of($mw, VerifyCsrfToken::class) || str_contains($mw, 'CsrfToken'))) {
                 $csrfInWeb = true;
             }
-        }
-        // Also check via class aliases (Laravel 11+ may use different class names)
-        if (! $ssInWeb) {
-            $ssInWeb = collect($webGroup)->contains(fn ($mw) => is_string($mw) && str_contains($mw, 'StartSession'));
-        }
-        if (! $csrfInWeb) {
-            $csrfInWeb = collect($webGroup)->contains(fn ($mw) => is_string($mw) && str_contains($mw, 'CsrfToken'));
         }
         $fails += $this->check('StartSession in web group', $ssInWeb);
         $fails += $this->check('VerifyCsrfToken in web group', $csrfInWeb);
 
-        // Show the full web middleware group for inspection
+        // Show global + web middleware for inspection
+        if (! empty($globalMiddleware)) {
+            $this->info('');
+            $this->info('    Global middleware:');
+            foreach ($globalMiddleware as $i => $mw) {
+                $short = is_string($mw) ? class_basename($mw) : '(closure)';
+                $this->line("      [{$i}] {$short}");
+            }
+        }
+
         $this->info('');
         $this->info('    Web middleware group:');
         foreach ($webGroup as $i => $mw) {

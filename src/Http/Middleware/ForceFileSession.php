@@ -6,7 +6,6 @@ namespace Codenzia\BrowserConsole\Http\Middleware;
 
 use Closure;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
@@ -21,32 +20,10 @@ class ForceFileSession
     {
         $path = config('browser-console.path', 'console');
         $isConsole = $request->is($path);
-
-        $isLivewire = $request->is('livewire/*');
-        $hasBody = $isLivewire && str_contains((string) $request->getContent(), 'browser-console');
-        $hasCookie = $isLivewire && $request->cookies->has('browser-console-session');
-        $hasReferer = $isLivewire && str_contains($request->header('Referer', ''), '/' . $path);
-        $isLivewireFromConsole = $isLivewire && ($hasBody || $hasCookie || $hasReferer);
-
-        // Debug logging — only when APP_DEBUG is true
-        if (config('app.debug') && ($isConsole || $isLivewire)) {
-            Log::debug('[BrowserConsole] ForceFileSession', [
-                'uri' => $request->getRequestUri(),
-                'method' => $request->method(),
-                'isConsole' => $isConsole,
-                'isLivewire' => $isLivewire,
-                'isLivewireFromConsole' => $isLivewireFromConsole,
-                'detection' => $isLivewire ? [
-                    'body' => $hasBody,
-                    'cookie' => $hasCookie,
-                    'referer' => $hasReferer,
-                ] : 'N/A',
-                'cookies' => array_keys($request->cookies->all()),
-                'referer' => $request->header('Referer', '(none)'),
-                'session.driver' => config('session.driver'),
-                'session.cookie' => config('session.cookie'),
-            ]);
-        }
+        $isLivewireFromConsole = $request->is('livewire/*')
+            && (str_contains((string) $request->getContent(), 'browser-console')
+                || $request->cookies->has('browser-console-session')
+                || str_contains($request->header('Referer', ''), '/' . $path));
 
         if ($isConsole || $isLivewireFromConsole) {
             // Optional IP whitelisting — empty/null means allow all
