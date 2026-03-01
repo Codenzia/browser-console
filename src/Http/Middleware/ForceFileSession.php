@@ -34,8 +34,16 @@ class ForceFileSession
                 }
             }
 
+            // Ensure the file session storage directory exists (common issue
+            // on fresh VPS deployments where only the database driver was used).
+            $sessionPath = storage_path('framework/sessions');
+            if (! is_dir($sessionPath)) {
+                @mkdir($sessionPath, 0755, true);
+            }
+
             config([
                 'session.driver' => 'file',
+                'session.files' => $sessionPath,
                 'session.cookie' => 'browser-console-session',
                 'cache.default' => 'file',
                 'browser-console.active' => true,

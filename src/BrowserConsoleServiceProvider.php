@@ -67,10 +67,15 @@ class BrowserConsoleServiceProvider extends PackageServiceProvider
         $this->registerRoutes();
 
         // Prepend ForceFileSession to the web middleware group so it runs
-        // before session start for console requests.
+        // before session start for console requests (including Livewire updates).
         /** @var Router $router */
         $router = $this->app->make(Router::class);
         $router->prependMiddlewareToGroup('web', ForceFileSession::class);
+
+        // Guarantee execution order: ForceFileSession must run before
+        // EncryptCookies / StartSession regardless of Laravel's middleware
+        // priority sorting, which could otherwise reorder group middleware.
+        array_unshift($router->middlewarePriority, ForceFileSession::class);
     }
 
     protected function registerRoutes(): void
