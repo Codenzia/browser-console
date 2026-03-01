@@ -181,7 +181,8 @@
                                     <span
                                         class="text-xs text-slate-500 ml-2">{{ $mode === 'shell' ? 'shell' : 'artisan' }}</span>
                                     <a href="https://www.codenzia.com" target="_blank" rel="noopener"
-                                        class="ml-auto text-slate-600 hover:text-slate-400 transition">©️</a>
+                                        class="ml-auto text-slate-600 hover:text-slate-400 transition text-xs">©️
+                                        {{ \Composer\InstalledVersions::getPrettyVersion('codenzia/browser-console') ?? '' }}</a>
                                 </div>
 
                                 {{-- Output Area --}}
