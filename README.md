@@ -212,6 +212,9 @@ php artisan browser-console:show --verify
 # Run deployment diagnostics from CLI
 php artisan browser-console:diagnose
 
+# Auto-fix detected issues (permissions, caches, missing files)
+php artisan browser-console:diagnose --fix
+
 # Force-refresh the web diagnostics page (public/bcd.php)
 php artisan browser-console:diagnose --refresh
 
@@ -240,10 +243,18 @@ The page checks:
 
 ### CLI Diagnostics
 
-If you have SSH access, run the same checks from the terminal:
+If you have SSH access, run comprehensive diagnostics from the terminal:
 
 ```bash
 php artisan browser-console:diagnose
+```
+
+This checks PHP environment, Laravel structure, file permissions, session & CSRF configuration, middleware stack (global + web group), session file read/write, CSRF token roundtrip, PHP settings (post_max_size, gc_maxlifetime, etc.), HTTPS & reverse proxy detection, cookie encryption order, and OPcache settings.
+
+Use `--fix` to auto-repair common issues (directory permissions, cache clearing, missing files):
+
+```bash
+php artisan browser-console:diagnose --fix
 ```
 
 ### Managing bcd.php
