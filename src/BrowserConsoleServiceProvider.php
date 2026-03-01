@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Codenzia\BrowserConsole;
 
 use Codenzia\BrowserConsole\Http\Middleware\ForceFileSession;
+use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Routing\Router;
 use Illuminate\Support\Facades\Route;
 use Livewire\Livewire;
@@ -66,16 +67,19 @@ class BrowserConsoleServiceProvider extends PackageServiceProvider
         // Register routes
         $this->registerRoutes();
 
-        // Prepend ForceFileSession to the web middleware group so it runs
-        // before session start for console requests (including Livewire updates).
-        /** @var Router $router */
-        $router = $this->app->make(Router::class);
-        $router->prependMiddlewareToGroup('web', ForceFileSession::class);
-
-        // Guarantee execution order: ForceFileSession must run before
-        // EncryptCookies / StartSession regardless of Laravel's middleware
-        // priority sorting, which could otherwise reorder group middleware.
-        array_unshift($router->middlewarePriority, ForceFileSession::class);
+        // Register ForceFileSession as global middleware so it runs for ALL
+        // HTTP requests (including Livewire's /livewire/update endpoint).
+        // prependMiddlewareToGroup('web') doesn't work reliably in Laravel 12
+        // because the Kernel may re-sync middleware groups after boot.
+        // ForceFileSession has its own conditional logic and only activates
+        // for console-related requests, so global registration is safe.
+        try {
+            /** @var \Illuminate\Foundation\Http\Kernel $kernel */
+            $kernel = $this->app->make(Kernel::class);
+            $kernel->prependMiddleware(ForceFileSession::class);
+        } catch (\Throwable) {
+            // CLI context — HTTP Kernel may not be available
+        }
     }
 
     protected function registerRoutes(): void
