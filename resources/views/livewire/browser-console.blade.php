@@ -41,10 +41,10 @@
                         <p class="text-sm text-slate-400 mt-2">Authenticate to continue</p>
                     </div>
 
-                    @if (session('error'))
+                    @if ($loginError)
                         <div
                             class="mb-4 px-3 py-2 bg-red-500/10 border border-red-500/30 rounded-lg text-sm text-red-400">
-                            {{ session('error') }}
+                            {{ $loginError }}
                         </div>
                     @endif
 

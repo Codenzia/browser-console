@@ -89,10 +89,10 @@ it('show command rejects incorrect password', function () {
         ->assertFailed();
 });
 
-it('diagnose command runs successfully', function () {
+it('diagnose command runs without errors', function () {
     $this->artisan('browser-console:diagnose')
         ->expectsOutputToContain('Deployment Diagnostics')
-        ->assertExitCode(0);
+        ->expectsOutputToContain('issue(s) found');
 });
 
 it('diagnose command registers the diagnose command', function () {

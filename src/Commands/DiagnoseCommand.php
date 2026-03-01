@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Codenzia\BrowserConsole\Commands;
 
-use Codenzia\BrowserConsole\Http\Middleware\ForceFileSession;
+use Codenzia\BrowserConsole\Http\Middleware\ConsoleGate;
 use Illuminate\Console\Command;
 use Illuminate\Cookie\Middleware\EncryptCookies;
 use Illuminate\Routing\Router;
@@ -316,34 +316,46 @@ class DiagnoseCommand extends Command
         // ── Middleware Stack ──
         $this->sectionHeader('Middleware Stack');
 
-        // Check ForceFileSession in global middleware (HTTP Kernel)
-        $globalMiddleware = [];
-        $fsInGlobal = false;
+        // Check ConsoleGate in route middleware for console path
+        $consolePath = config('browser-console.path', 'console');
+        $cgInRoute = false;
         try {
-            /** @var \Illuminate\Foundation\Http\Kernel $kernel */
-            $kernel = app(\Illuminate\Contracts\Http\Kernel::class);
-            if (method_exists($kernel, 'getGlobalMiddleware')) {
-                $globalMiddleware = $kernel->getGlobalMiddleware();
+            $routes = app('router')->getRoutes();
+            $testRequest = \Illuminate\Http\Request::create('/' . $consolePath, 'GET');
+            $matched = $routes->match($testRequest);
+            if ($matched) {
+                $routeMiddleware = $matched->gatherMiddleware();
+                foreach ($routeMiddleware as $mw) {
+                    if (is_string($mw) && ($mw === ConsoleGate::class || str_contains($mw, 'ConsoleGate'))) {
+                        $cgInRoute = true;
+
+                        break;
+                    }
+                }
             }
-            $fsInGlobal = in_array(ForceFileSession::class, $globalMiddleware, true);
         } catch (\Throwable) {
-            // CLI — kernel may not be available; replay boot logic
+            // Ignore — route may not be registered
         }
-
-        // In CLI mode the ServiceProvider's packageBooted() may not have
-        // registered ForceFileSession with the Kernel. Check and simulate.
-        if (! $fsInGlobal && ! empty($globalMiddleware)) {
-            // ServiceProvider would call $kernel->prependMiddleware()
-            $fsInGlobal = false; // truly missing
-        } elseif (empty($globalMiddleware)) {
-            // Kernel not available — replay: assume it would be registered
-            $fsInGlobal = class_exists(ForceFileSession::class);
-        }
-
         $fails += $this->check(
-            'ForceFileSession in global middleware',
-            $fsInGlobal,
-            $fsInGlobal ? 'Registered' : 'MISSING — Livewire POSTs will fail with 419'
+            'ConsoleGate on console route',
+            $cgInRoute,
+            $cgInRoute ? 'Registered' : 'MISSING'
+        );
+
+        // Check ConsoleGate in Livewire persistent middleware
+        $cgInPersistent = false;
+        if (class_exists(\Livewire\Livewire::class)) {
+            try {
+                $persistent = \Livewire\Livewire::getPersistentMiddleware();
+                $cgInPersistent = in_array(ConsoleGate::class, $persistent, true);
+            } catch (\Throwable) {
+                // Ignore
+            }
+        }
+        $fails += $this->check(
+            'ConsoleGate in Livewire persistent middleware',
+            $cgInPersistent,
+            $cgInPersistent ? 'Registered' : 'MISSING — Livewire updates may lack IP check'
         );
 
         // Check the web middleware group for StartSession & VerifyCsrfToken
@@ -372,16 +384,6 @@ class DiagnoseCommand extends Command
         }
         $fails += $this->check('StartSession in web group', $ssInWeb);
         $fails += $this->check('VerifyCsrfToken in web group', $csrfInWeb);
-
-        // Show global + web middleware for inspection
-        if (! empty($globalMiddleware)) {
-            $this->info('');
-            $this->info('    Global middleware:');
-            foreach ($globalMiddleware as $i => $mw) {
-                $short = is_string($mw) ? class_basename($mw) : '(closure)';
-                $this->line("      [{$i}] {$short}");
-            }
-        }
 
         $this->info('');
         $this->info('    Web middleware group:');
@@ -412,29 +414,19 @@ class DiagnoseCommand extends Command
         $this->sectionHeader('Session Roundtrip');
 
         try {
-            // Simulate what ForceFileSession does
-            $originalDriver = config('session.driver');
-            $originalCookie = config('session.cookie');
-
-            config([
-                'session.driver' => 'file',
-                'session.files' => $sessionPath,
-                'session.cookie' => 'browser-console-session',
-            ]);
-
-            // Create a fresh session manager to avoid cached drivers
+            // Test the app's session driver to verify CSRF token persistence
             $manager = new \Illuminate\Session\SessionManager(app());
-            $session = $manager->driver('file');
+            $session = $manager->driver();
             $session->start();
 
             $token = \Illuminate\Support\Str::random(40);
             $session->put('_token', $token);
             $session->save();
             $sessionId = $session->getId();
-            $this->check('Create file session', true, "ID: {$sessionId}");
+            $this->check('Create session', true, "ID: {$sessionId}");
 
-            // Reload the session from the file (simulates the Livewire POST)
-            $session2 = $manager->driver('file');
+            // Reload the session (simulates the Livewire POST)
+            $session2 = $manager->driver();
             $session2->setId($sessionId);
             $session2->start();
             $token2 = $session2->get('_token');
@@ -445,14 +437,10 @@ class DiagnoseCommand extends Command
                 $match ? 'Token persisted' : "MISMATCH: wrote {$token}, got {$token2}"
             );
 
-            // Clean up test session file
-            @unlink($sessionPath . '/' . $sessionId);
-
-            // Restore original config
-            config([
-                'session.driver' => $originalDriver,
-                'session.cookie' => $originalCookie,
-            ]);
+            // Clean up test session file if file driver
+            if (config('session.driver') === 'file') {
+                @unlink($sessionPath . '/' . $sessionId);
+            }
         } catch (\Throwable $e) {
             $fails += $this->check('Session roundtrip', false, $e->getMessage());
         }

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Codenzia\BrowserConsole\Livewire;
 
+use Codenzia\BrowserConsole\Support\ConsoleAuth;
 use Illuminate\Contracts\View\View;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\File;
@@ -22,6 +23,8 @@ class BrowserConsole extends Component
     public string $command = '';
 
     public string $mode = 'artisan';
+
+    public string $loginError = '';
 
     public bool $shellAvailable = true;
 
@@ -69,23 +72,7 @@ class BrowserConsole extends Component
             return (bool) call_user_func($gate, request());
         }
 
-        if (! session('console_authenticated', false)) {
-            return false;
-        }
-
-        // Session timeout based on config
-        $timeout = (int) config('browser-console.session_timeout', 1800);
-        $lastActivity = session('console_last_activity', 0);
-
-        if ($lastActivity && (time() - $lastActivity) > $timeout) {
-            session()->forget(['console_authenticated', 'console_last_activity']);
-
-            return false;
-        }
-
-        session(['console_last_activity' => time()]);
-
-        return true;
+        return ConsoleAuth::check(request());
     }
 
     public function authenticate(): void
@@ -94,29 +81,26 @@ class BrowserConsole extends Component
         $configPassword = config('browser-console.password');
 
         if (! $configUser || ! $configPassword) {
-            session()->flash('error', __('Console access not configured. Run: php artisan browser-console:create'));
+            $this->loginError = __('Console access not configured. Run: php artisan browser-console:create');
 
             return;
         }
 
         if ($this->username !== $configUser || ! Hash::check($this->password, $configPassword)) {
-            session()->flash('error', __('Invalid credentials.'));
+            $this->loginError = __('Invalid credentials.');
             $this->password = '';
 
             return;
         }
 
-        session([
-            'console_authenticated' => true,
-            'console_last_activity' => time(),
-        ]);
+        ConsoleAuth::login();
         $this->username = '';
         $this->password = '';
     }
 
     public function logout(): void
     {
-        session()->forget('console_authenticated');
+        ConsoleAuth::logout();
         $this->history = [];
         $this->command = '';
     }

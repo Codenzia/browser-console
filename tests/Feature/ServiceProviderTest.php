@@ -1,7 +1,7 @@
 <?php
 
 use Codenzia\BrowserConsole\BrowserConsoleServiceProvider;
-use Codenzia\BrowserConsole\Http\Middleware\ForceFileSession;
+use Codenzia\BrowserConsole\Http\Middleware\ConsoleGate;
 use Illuminate\Support\Facades\Route;
 
 it('registers the service provider', function () {
@@ -50,11 +50,10 @@ it('registers artisan commands', function () {
         ->toContain('browser-console:diagnose');
 });
 
-it('prepends ForceFileSession middleware to web group', function () {
-    $router = app('router');
-    $middlewareGroups = $router->getMiddlewareGroups();
+it('registers ConsoleGate as Livewire persistent middleware', function () {
+    $persistent = \Livewire\Livewire::getPersistentMiddleware();
 
-    expect($middlewareGroups['web'])->toContain(ForceFileSession::class);
+    expect($persistent)->toContain(ConsoleGate::class);
 });
 
 it('does not auto-publish bcd.php on boot', function () {

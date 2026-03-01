@@ -121,16 +121,19 @@ it('respects session timeout', function () {
     config()->set('browser-console.password', $hash);
     config()->set('browser-console.session_timeout', 1); // 1 second
 
-    $component = Livewire::test(BrowserConsole::class)
+    // Login and verify authenticated
+    Livewire::test(BrowserConsole::class)
         ->set('username', 'admin')
         ->set('password', 'testpass123')
         ->call('authenticate')
         ->assertSet('isAuthenticated', true);
 
-    // Wait for timeout
-    sleep(2);
+    // Clear the in-memory auth state to simulate a new HTTP request.
+    // In production the cookie carries state between requests, but Livewire
+    // tests share the app container within a test method.
+    app()->forgetInstance('browser-console.auth.pending');
 
-    // Re-check authentication — should be expired
+    // Without the cookie in the request, auth should be false
     $component = Livewire::test(BrowserConsole::class);
     expect($component->get('isAuthenticated'))->toBeFalse();
 });

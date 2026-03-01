@@ -4,9 +4,7 @@ declare(strict_types=1);
 
 namespace Codenzia\BrowserConsole;
 
-use Codenzia\BrowserConsole\Http\Middleware\ForceFileSession;
-use Illuminate\Contracts\Http\Kernel;
-use Illuminate\Routing\Router;
+use Codenzia\BrowserConsole\Http\Middleware\ConsoleGate;
 use Illuminate\Support\Facades\Route;
 use Livewire\Livewire;
 use Spatie\LaravelPackageTools\Commands\InstallCommand;
@@ -64,27 +62,19 @@ class BrowserConsoleServiceProvider extends PackageServiceProvider
         // Register the Livewire component
         Livewire::component('browser-console::terminal', \Codenzia\BrowserConsole\Livewire\BrowserConsole::class);
 
+        // Tell Livewire to re-apply ConsoleGate during update requests for
+        // components that originated from routes with this middleware.
+        // This replaces the old global middleware approach which interfered
+        // with the host app's sessions and Livewire components.
+        Livewire::addPersistentMiddleware(ConsoleGate::class);
+
         // Register routes
         $this->registerRoutes();
-
-        // Register ForceFileSession as global middleware so it runs for ALL
-        // HTTP requests (including Livewire's /livewire/update endpoint).
-        // prependMiddlewareToGroup('web') doesn't work reliably in Laravel 12
-        // because the Kernel may re-sync middleware groups after boot.
-        // ForceFileSession has its own conditional logic and only activates
-        // for console-related requests, so global registration is safe.
-        try {
-            /** @var \Illuminate\Foundation\Http\Kernel $kernel */
-            $kernel = $this->app->make(Kernel::class);
-            $kernel->prependMiddleware(ForceFileSession::class);
-        } catch (\Throwable) {
-            // CLI context — HTTP Kernel may not be available
-        }
     }
 
     protected function registerRoutes(): void
     {
-        Route::middleware([ForceFileSession::class, 'web'])
+        Route::middleware([ConsoleGate::class, 'web'])
             ->group(function () {
                 $this->loadRoutesFrom(__DIR__ . '/../routes/web.php');
             });
