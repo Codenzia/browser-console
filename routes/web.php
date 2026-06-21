@@ -4,10 +4,10 @@ use Codenzia\BrowserConsole\Livewire\BrowserConsole;
 use Illuminate\Support\Facades\Route;
 
 // Browser Console route — no database dependency.
-// Uses its own middleware stack with file-based sessions.
-// Throttle configurable via BROWSER_CONSOLE_THROTTLE in .env (default 600 req/min).
+// Auth via encrypted cookie (ConsoleAuth), no sessions required.
+// Throttle configurable via BROWSER_CONSOLE_THROTTLE in .env (default 60 req/min).
 $path = config('browser-console.path', 'console');
-$throttle = config('browser-console.throttle', 600);
+$throttle = config('browser-console.throttle', 60);
 $excludeMiddleware = config('browser-console.exclude_middleware', []);
 
 $route = Route::get($path, BrowserConsole::class)

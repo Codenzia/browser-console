@@ -1,5 +1,9 @@
 <?php
 
+use Illuminate\Contracts\Console\Kernel;
+use Illuminate\Http\Request;
+use Symfony\Component\Console\Output\BufferedOutput;
+
 /*
 |--------------------------------------------------------------------------
 | Browser Console - Deployment Diagnostics
@@ -25,13 +29,13 @@ header('Content-Type: text/html; charset=utf-8');
 // --- Detect Laravel root ---
 $basePath = null;
 $candidates = [
-    __DIR__ . '/..',     // Standard: we're in public/
+    __DIR__.'/..',     // Standard: we're in public/
     __DIR__,             // We're placed in Laravel root directly
-    __DIR__ . '/../..',  // Nested: public_html/public/
+    __DIR__.'/../..',  // Nested: public_html/public/
 ];
 
 foreach ($candidates as $candidate) {
-    if (file_exists($candidate . '/artisan') && file_exists($candidate . '/bootstrap/app.php')) {
+    if (file_exists($candidate.'/artisan') && file_exists($candidate.'/bootstrap/app.php')) {
         $basePath = realpath($candidate);
 
         break;
@@ -63,8 +67,8 @@ function bc_parse_env_value(string $raw): string
     return $raw;
 }
 
-if ($basePath && file_exists($basePath . '/.env')) {
-    $envContent = file_get_contents($basePath . '/.env');
+if ($basePath && file_exists($basePath.'/.env')) {
+    $envContent = file_get_contents($basePath.'/.env');
 
     if (preg_match('/^BROWSER_CONSOLE_USER=(.+)$/m', $envContent, $m)) {
         $envUser = bc_parse_env_value($m[1]);
@@ -87,18 +91,41 @@ if ($envUser && $envPasswordHash) {
     if (isset($_GET['logout'])) {
         $_SESSION = [];
         session_destroy();
-        header('Location: ' . strtok($_SERVER['REQUEST_URI'], '?'));
+        header('Location: '.strtok($_SERVER['REQUEST_URI'], '?'));
 
         exit;
     }
 
-    // Handle login attempt
+    // Brute-force lockout: 5 failed attempts within a 15-minute window block
+    // further attempts until the window elapses. Time-windowed so a legitimate
+    // operator is never locked out permanently; cleared on successful login.
+    $lockoutWindow = 900; // 15 minutes
+    $lockoutMax = 5;
+    $now = time();
+
+    if (! isset($_SESSION['bcd_fail_count']) || ($now - ($_SESSION['bcd_fail_at'] ?? 0)) > $lockoutWindow) {
+        $_SESSION['bcd_fail_count'] = 0;
+        $_SESSION['bcd_fail_at'] = $now;
+    }
+
+    $lockedOut = ($_SESSION['bcd_fail_count'] ?? 0) >= $lockoutMax;
+
+    // Handle login attempt (with CSRF verification)
     if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['username'], $_POST['password']) && ! isset($_POST['fix'])) {
-        if ($_POST['username'] === $envUser && password_verify($_POST['password'], $envPasswordHash)) {
+        $csrfValid = isset($_POST['_token'], $_SESSION['bcd_csrf']) && hash_equals($_SESSION['bcd_csrf'], $_POST['_token']);
+        if ($lockedOut) {
+            $remaining = (int) ceil(($lockoutWindow - ($now - ($_SESSION['bcd_fail_at'] ?? $now))) / 60);
+            $authError = 'Too many failed attempts. Try again in '.max(1, $remaining).' minute(s).';
+        } elseif (! $csrfValid) {
+            $authError = 'Invalid or expired form submission. Please try again.';
+        } elseif (hash_equals($envUser, (string) $_POST['username']) && password_verify($_POST['password'], $envPasswordHash)) {
             $_SESSION['bcd_authenticated'] = true;
             $_SESSION['bcd_auth_time'] = time();
+            $_SESSION['bcd_fail_count'] = 0;
             $authenticated = true;
         } else {
+            $_SESSION['bcd_fail_count'] = ($_SESSION['bcd_fail_count'] ?? 0) + 1;
+            $_SESSION['bcd_fail_at'] = $now;
             $authError = 'Invalid credentials.';
         }
     }
@@ -144,22 +171,24 @@ if (! $authenticated) {
 <div class="card">
     <h1>Browser Console Diagnostics</h1>
     <div class="sub">codenzia/browser-console</div>
-    <?php if ($envUser && $envPasswordHash): ?>
-        <?php if ($authError): ?>
+    <?php if ($envUser && $envPasswordHash) { ?>
+        <?php if ($authError) { ?>
             <div class="error"><?= htmlspecialchars($authError) ?></div>
-        <?php endif; ?>
+        <?php } ?>
+        <?php $_SESSION['bcd_csrf'] = bin2hex(random_bytes(32)); ?>
         <form method="POST">
+            <input type="hidden" name="_token" value="<?= $_SESSION['bcd_csrf'] ?>">
             <input type="text" name="username" placeholder="Username" required autofocus>
             <input type="password" name="password" placeholder="Password" required>
             <button type="submit">Authenticate</button>
         </form>
-    <?php else: ?>
+    <?php } else { ?>
         <p class="locked">
             Diagnostics locked.<br><br>
             Run: php artisan browser-console:create<br>
             to configure credentials.
         </p>
-    <?php endif; ?>
+    <?php } ?>
 </div>
 </body>
 </html><?php
@@ -169,6 +198,9 @@ if (! $authenticated) {
 // =====================================================================
 //  AUTHENTICATED — Handle fix actions, then run diagnostics
 // =====================================================================
+
+// Generate CSRF token for fix action forms
+$_SESSION['bcd_csrf'] = bin2hex(random_bytes(32));
 
 $fixMessage = '';
 $fixSuccess = false;
@@ -185,9 +217,9 @@ if ($basePath) {
         'storage/logs', 'bootstrap/cache',
     ];
     foreach ($dirs as $dir) {
-        $key = 'mkdir_' . str_replace('/', '_', $dir);
+        $key = 'mkdir_'.str_replace('/', '_', $dir);
         $fixActions[$key] = function () use ($basePath, $dir) {
-            $path = $basePath . '/' . $dir;
+            $path = $basePath.'/'.$dir;
             if (! is_dir($path)) {
                 mkdir($path, 0775, true);
             }
@@ -196,9 +228,9 @@ if ($basePath) {
             return "Created and set permissions: {$dir}";
         };
 
-        $chmodKey = 'chmod_' . str_replace('/', '_', $dir);
+        $chmodKey = 'chmod_'.str_replace('/', '_', $dir);
         $fixActions[$chmodKey] = function () use ($basePath, $dir) {
-            chmod($basePath . '/' . $dir, 0775);
+            chmod($basePath.'/'.$dir, 0775);
 
             return "Fixed permissions: {$dir}";
         };
@@ -206,8 +238,8 @@ if ($basePath) {
 
     // .env from .env.example
     $fixActions['create_env'] = function () use ($basePath) {
-        if (file_exists($basePath . '/.env.example')) {
-            copy($basePath . '/.env.example', $basePath . '/.env');
+        if (file_exists($basePath.'/.env.example')) {
+            copy($basePath.'/.env.example', $basePath.'/.env');
 
             return 'Created .env from .env.example — run php artisan key:generate next';
         }
@@ -215,16 +247,99 @@ if ($basePath) {
         return '.env.example not found — create .env manually';
     };
 
+    // Create SQLite database file
+    $fixActions['create_sqlite_db'] = function () use ($basePath, $envContent) {
+        $dbDatabase = '';
+        if (preg_match('/^DB_DATABASE=(.+)$/m', $envContent, $m)) {
+            $dbDatabase = bc_parse_env_value($m[1]);
+        }
+
+        // Resolve SQLite file path (same logic as Laravel's database config)
+        $sqlitePath = $dbDatabase;
+        if (! $sqlitePath || $sqlitePath === ':memory:') {
+            $sqlitePath = $basePath.'/database/database.sqlite';
+        } elseif (! str_starts_with($sqlitePath, '/') && ! preg_match('/^[A-Z]:\\\\/i', $sqlitePath)) {
+            $sqlitePath = $basePath.'/'.$sqlitePath;
+        }
+
+        $dir = dirname($sqlitePath);
+        if (! is_dir($dir)) {
+            mkdir($dir, 0775, true);
+        }
+
+        touch($sqlitePath);
+        chmod($sqlitePath, 0664);
+
+        return 'Created SQLite database: '.basename($sqlitePath).' — run migrations next (php artisan migrate)';
+    };
+
+    // Run artisan migrate (boots Laravel, runs all pending migrations)
+    $fixActions['run_migrate'] = function () use ($basePath, $envContent) {
+        if (! file_exists($basePath.'/vendor/autoload.php')) {
+            return 'Cannot run: vendor/autoload.php not found (run composer install first)';
+        }
+
+        // For SQLite, ensure the database file exists before booting Laravel
+        $dbConnection = 'sqlite';
+        if (preg_match('/^DB_CONNECTION=(.+)$/m', $envContent, $m)) {
+            $dbConnection = bc_parse_env_value($m[1]);
+        }
+
+        if ($dbConnection === 'sqlite') {
+            $dbDatabase = '';
+            if (preg_match('/^DB_DATABASE=(.+)$/m', $envContent, $m)) {
+                $dbDatabase = bc_parse_env_value($m[1]);
+            }
+
+            $sqlitePath = $dbDatabase;
+            if (! $sqlitePath || $sqlitePath === ':memory:') {
+                $sqlitePath = $basePath.'/database/database.sqlite';
+            } elseif (! str_starts_with($sqlitePath, '/') && ! preg_match('/^[A-Z]:\\\\/i', $sqlitePath)) {
+                $sqlitePath = $basePath.'/'.$sqlitePath;
+            }
+
+            if (! file_exists($sqlitePath)) {
+                $dir = dirname($sqlitePath);
+                if (! is_dir($dir)) {
+                    mkdir($dir, 0775, true);
+                }
+                touch($sqlitePath);
+                chmod($sqlitePath, 0664);
+            }
+        }
+
+        ob_start();
+
+        try {
+            require_once $basePath.'/vendor/autoload.php';
+            $app = require $basePath.'/bootstrap/app.php';
+            $kernel = $app->make(Kernel::class);
+            $kernel->bootstrap();
+
+            $output = new BufferedOutput;
+            $kernel->call('migrate', ['--force' => true], $output);
+            ob_end_clean();
+
+            $result = trim($output->fetch());
+
+            return $result ? 'Migration output: '.$result : 'Migrations completed (no output)';
+        } catch (Throwable $e) {
+            ob_end_clean();
+
+            return 'Migration failed: '.$e->getMessage();
+        }
+    };
+
     // Remove public/hot (Vite dev leftover)
     $fixActions['remove_hot'] = function () use ($basePath) {
-        unlink($basePath . '/public/hot');
+        unlink($basePath.'/public/hot');
 
         return 'Removed public/hot';
     };
 
     // Clear config cache
     $fixActions['clear_config_cache'] = function () use ($basePath) {
-        $file = $basePath . '/bootstrap/cache/config.php';
+        $file = $basePath.'/bootstrap/cache/config.php';
         if (file_exists($file)) {
             unlink($file);
         }
@@ -234,7 +349,7 @@ if ($basePath) {
 
     // Clear routes cache
     $fixActions['clear_routes_cache'] = function () use ($basePath) {
-        $file = $basePath . '/bootstrap/cache/routes-v7.php';
+        $file = $basePath.'/bootstrap/cache/routes-v7.php';
         if (file_exists($file)) {
             unlink($file);
         }
@@ -244,10 +359,10 @@ if ($basePath) {
 
     // Clear compiled views
     $fixActions['clear_views'] = function () use ($basePath) {
-        $dir = $basePath . '/storage/framework/views';
+        $dir = $basePath.'/storage/framework/views';
         $count = 0;
         if (is_dir($dir)) {
-            foreach (glob($dir . '/*.php') as $file) {
+            foreach (glob($dir.'/*.php') as $file) {
                 unlink($file);
                 $count++;
             }
@@ -261,7 +376,7 @@ if ($basePath) {
         $files = ['bootstrap/cache/packages.php', 'bootstrap/cache/services.php'];
         $cleared = 0;
         foreach ($files as $f) {
-            $path = $basePath . '/' . $f;
+            $path = $basePath.'/'.$f;
             if (file_exists($path)) {
                 unlink($path);
                 $cleared++;
@@ -273,8 +388,8 @@ if ($basePath) {
 
     // Create storage symlink
     $fixActions['create_storage_link'] = function () use ($basePath) {
-        $link = $basePath . '/public/storage';
-        $target = $basePath . '/storage/app/public';
+        $link = $basePath.'/public/storage';
+        $target = $basePath.'/storage/app/public';
         if (! is_link($link) && is_dir($target)) {
             symlink($target, $link);
 
@@ -309,17 +424,17 @@ if ($basePath) {
     RewriteRule ^ index.php [L]
 </IfModule>
 HTACCESS;
-        file_put_contents($basePath . '/public/.htaccess', $htaccess);
+        file_put_contents($basePath.'/public/.htaccess', $htaccess);
 
         return 'Restored public/.htaccess with default Laravel rules';
     };
 
     // Fix .htaccess (missing RewriteEngine)
     $fixActions['fix_htaccess_rewrite'] = function () use ($basePath) {
-        $path = $basePath . '/public/.htaccess';
+        $path = $basePath.'/public/.htaccess';
         $content = file_get_contents($path);
         if (! preg_match('/RewriteEngine\s+On/i', $content)) {
-            $content = "RewriteEngine On\n" . $content;
+            $content = "RewriteEngine On\n".$content;
             file_put_contents($path, $content);
 
             return 'Added RewriteEngine On to .htaccess';
@@ -340,21 +455,25 @@ HTACCESS;
     };
 }
 
-// --- Process fix request ---
+// --- Process fix request (with CSRF verification) ---
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['fix'])) {
-    $fixId = $_POST['fix'];
-    if (isset($fixActions[$fixId])) {
+    $csrfValid = isset($_POST['_token'], $_SESSION['bcd_csrf']) && hash_equals($_SESSION['bcd_csrf'], $_POST['_token']);
+    if (! $csrfValid) {
+        $fixMessage = 'Invalid or expired form submission. Please reload the page.';
+        $fixSuccess = false;
+    } elseif (isset($fixActions[$_POST['fix']])) {
+        $fixId = $_POST['fix'];
         try {
             $fixMessage = $fixActions[$fixId]();
             $fixSuccess = true;
-        } catch (\Throwable $e) {
-            $fixMessage = 'Fix failed: ' . $e->getMessage();
+        } catch (Throwable $e) {
+            $fixMessage = 'Fix failed: '.$e->getMessage();
             $fixSuccess = false;
         }
     }
     // Re-read .env after fix (it may have been created)
-    if ($basePath && file_exists($basePath . '/.env')) {
-        $envContent = file_get_contents($basePath . '/.env');
+    if ($basePath && file_exists($basePath.'/.env')) {
+        $envContent = file_get_contents($basePath.'/.env');
     }
 }
 
@@ -368,10 +487,10 @@ function bc_check_writable(string $path, string $label): array
 {
     $key = str_replace('/', '_', $label);
     if (! file_exists($path)) {
-        return bc_check($label, false, 'Missing', "mkdir -p {$label} && chmod 775 {$label}", 'mkdir_' . $key);
+        return bc_check($label, false, 'Missing', "mkdir -p {$label} && chmod 775 {$label}", 'mkdir_'.$key);
     }
     if (! is_writable($path)) {
-        return bc_check($label, false, 'Not writable', "chmod -R 775 {$label}", 'chmod_' . $key);
+        return bc_check($label, false, 'Not writable', "chmod -R 775 {$label}", 'chmod_'.$key);
     }
 
     return bc_check($label, true, 'Writable');
@@ -382,10 +501,10 @@ function bc_check_writable(string $path, string $label): array
 // ================================================================
 $php = [];
 $phpVersionOk = version_compare(PHP_VERSION, '8.2.0', '>=');
-$php[] = bc_check('PHP Version >= 8.2', $phpVersionOk, PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION . '.x', 'Upgrade PHP to 8.2+');
+$php[] = bc_check('PHP Version >= 8.2', $phpVersionOk, PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION.'.x', 'Upgrade PHP to 8.2+');
 $php[] = bc_check('SAPI', true, php_sapi_name());
 $php[] = bc_check('Memory Limit', true, ini_get('memory_limit'));
-$php[] = bc_check('Max Execution Time', true, ini_get('max_execution_time') . 's');
+$php[] = bc_check('Max Execution Time', true, ini_get('max_execution_time').'s');
 
 $requiredExts = ['json', 'mbstring', 'openssl', 'tokenizer', 'xml', 'ctype', 'fileinfo', 'dom', 'curl', 'pdo'];
 foreach ($requiredExts as $ext) {
@@ -429,8 +548,8 @@ if (! $basePath) {
     $structure[] = bc_check('Laravel Root', true, 'Detected');
 
     // .env
-    $envExists = file_exists($basePath . '/.env');
-    $envExampleExists = file_exists($basePath . '/.env.example');
+    $envExists = file_exists($basePath.'/.env');
+    $envExampleExists = file_exists($basePath.'/.env.example');
     if ($envExists) {
         $structure[] = bc_check('.env', true, 'Found');
     } else {
@@ -469,9 +588,26 @@ if (! $basePath) {
             $appUrl = trim($m[1]);
             $isLocalhost = str_contains($appUrl, 'localhost') || str_contains($appUrl, '127.0.0.1');
             if ($isProduction && $isLocalhost) {
-                $structure[] = bc_check('APP_URL', false, $appUrl . ' (still localhost in production)', 'Update APP_URL to your domain');
+                $structure[] = bc_check('APP_URL', false, $appUrl.' (still localhost in production)', 'Update APP_URL to your domain');
             } else {
                 $structure[] = bc_check('APP_URL', true, $appUrl);
+            }
+
+            // APP_URL domain vs actual request domain
+            $appUrlHost = parse_url($appUrl, PHP_URL_HOST);
+            $actualHost = $_SERVER['HTTP_HOST'] ?? $_SERVER['SERVER_NAME'] ?? null;
+            if ($actualHost && str_contains($actualHost, ':')) {
+                $actualHost = explode(':', $actualHost, 2)[0];
+            }
+            if ($appUrlHost && $actualHost) {
+                $domainMatch = strcasecmp($appUrlHost, $actualHost) === 0;
+                if ($domainMatch) {
+                    $structure[] = bc_check('APP_URL domain match', true, $appUrlHost);
+                } else {
+                    $structure[] = bc_check('APP_URL domain match', false,
+                        "APP_URL host '{$appUrlHost}' ≠ actual host '{$actualHost}'",
+                        "Update APP_URL to match your domain ({$actualHost})");
+                }
             }
         } else {
             $structure[] = bc_check('APP_URL', false, 'NOT SET', 'Add APP_URL=https://your-domain.com to .env');
@@ -479,26 +615,26 @@ if (! $basePath) {
     }
 
     // Vendor
-    $vendorExists = is_dir($basePath . '/vendor');
+    $vendorExists = is_dir($basePath.'/vendor');
     $structure[] = bc_check('vendor/', $vendorExists, $vendorExists ? 'Found' : 'MISSING', 'composer install --no-dev --optimize-autoloader');
 
-    $autoloadExists = file_exists($basePath . '/vendor/autoload.php');
+    $autoloadExists = file_exists($basePath.'/vendor/autoload.php');
     $structure[] = bc_check('vendor/autoload.php', $autoloadExists, $autoloadExists ? 'Found' : 'MISSING', 'composer dump-autoload');
 
     // composer.lock
-    $composerLock = file_exists($basePath . '/composer.lock');
+    $composerLock = file_exists($basePath.'/composer.lock');
     $structure[] = bc_check('composer.lock', $composerLock, $composerLock ? 'Found' : 'MISSING (installs may not be reproducible)', 'Run composer install locally and commit composer.lock');
 
     // Caches
-    $configCached = file_exists($basePath . '/bootstrap/cache/config.php');
+    $configCached = file_exists($basePath.'/bootstrap/cache/config.php');
     $structure[] = bc_check('Config Cache', true, $configCached ? 'Cached (clear if stale)' : 'Not cached', '', $configCached ? 'clear_config_cache' : '');
 
-    $routesCached = file_exists($basePath . '/bootstrap/cache/routes-v7.php');
+    $routesCached = file_exists($basePath.'/bootstrap/cache/routes-v7.php');
     $structure[] = bc_check('Routes Cache', true, $routesCached ? 'Cached (clear if stale)' : 'Not cached', '', $routesCached ? 'clear_routes_cache' : '');
 
     // Package/service discovery cache
-    $pkgCache = file_exists($basePath . '/bootstrap/cache/packages.php');
-    $svcCache = file_exists($basePath . '/bootstrap/cache/services.php');
+    $pkgCache = file_exists($basePath.'/bootstrap/cache/packages.php');
+    $svcCache = file_exists($basePath.'/bootstrap/cache/services.php');
     if ($pkgCache || $svcCache) {
         $parts = [];
         if ($pkgCache) {
@@ -507,13 +643,13 @@ if (! $basePath) {
         if ($svcCache) {
             $parts[] = 'services.php';
         }
-        $structure[] = bc_check('Discovery Cache', true, implode(', ', $parts) . ' (clear if stale)', '', 'clear_discovery_cache');
+        $structure[] = bc_check('Discovery Cache', true, implode(', ', $parts).' (clear if stale)', '', 'clear_discovery_cache');
     }
 
     // Compiled views
-    $viewsDir = $basePath . '/storage/framework/views';
+    $viewsDir = $basePath.'/storage/framework/views';
     if (is_dir($viewsDir)) {
-        $compiledViews = count(glob($viewsDir . '/*.php'));
+        $compiledViews = count(glob($viewsDir.'/*.php'));
         if ($compiledViews > 0) {
             $structure[] = bc_check('Compiled Views', true, "{$compiledViews} file(s) (clear if stale)", '', 'clear_views');
         }
@@ -521,17 +657,152 @@ if (! $basePath) {
 }
 
 // ================================================================
-//  Section 3: Web Server & Public Directory
+//  Section 3: Database
+// ================================================================
+$database = [];
+
+if ($basePath && $envContent) {
+    // Parse database configuration from .env
+    $dbConnection = 'sqlite';
+    if (preg_match('/^DB_CONNECTION=(.+)$/m', $envContent, $m)) {
+        $dbConnection = bc_parse_env_value($m[1]);
+    }
+    $database[] = bc_check('DB_CONNECTION', true, $dbConnection);
+
+    if ($dbConnection === 'sqlite') {
+        // Resolve SQLite file path
+        $dbDatabase = '';
+        if (preg_match('/^DB_DATABASE=(.+)$/m', $envContent, $m)) {
+            $dbDatabase = bc_parse_env_value($m[1]);
+        }
+
+        $sqlitePath = $dbDatabase;
+        if (! $sqlitePath || $sqlitePath === ':memory:') {
+            $sqlitePath = $basePath.'/database/database.sqlite';
+        } elseif (! str_starts_with($sqlitePath, '/') && ! preg_match('/^[A-Z]:\\\\/i', $sqlitePath)) {
+            $sqlitePath = $basePath.'/'.$sqlitePath;
+        }
+
+        $relPath = str_replace([$basePath.'/', $basePath.'\\'], '', $sqlitePath);
+        $fileExists = file_exists($sqlitePath);
+
+        if ($fileExists) {
+            $database[] = bc_check('SQLite file', true, $relPath);
+            $writable = is_writable($sqlitePath);
+            $database[] = bc_check('SQLite writable', $writable, $writable ? 'Writable' : 'NOT WRITABLE', 'chmod 664 '.$relPath);
+
+            // Check key tables
+            try {
+                $pdo = new PDO('sqlite:'.$sqlitePath);
+                $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+
+                $tables = [];
+                $stmt = $pdo->query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name");
+                while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                    $tables[] = $row['name'];
+                }
+
+                $tableCount = count($tables);
+                $database[] = bc_check('Tables found', $tableCount > 0, $tableCount.' table(s)', $tableCount === 0 ? 'Run migrations' : '', $tableCount === 0 ? 'run_migrate' : '');
+
+                $keyTables = ['migrations', 'sessions', 'cache', 'users'];
+                foreach ($keyTables as $t) {
+                    $exists = in_array($t, $tables, true);
+                    $database[] = bc_check("Table: {$t}", $exists, $exists ? 'Exists' : 'MISSING', 'Run migrations', $exists ? '' : 'run_migrate');
+                }
+            } catch (Throwable $e) {
+                $database[] = bc_check('SQLite readable', false, $e->getMessage());
+            }
+        } else {
+            $database[] = bc_check('SQLite file', false, 'MISSING: '.$relPath, 'Create the database file', 'create_sqlite_db');
+        }
+    } elseif (in_array($dbConnection, ['mysql', 'mariadb', 'pgsql'], true)) {
+        $dbHost = '127.0.0.1';
+        $dbPort = $dbConnection === 'pgsql' ? '5432' : '3306';
+        $dbName = '';
+        $dbUser = 'root';
+        $dbPass = '';
+
+        if (preg_match('/^DB_HOST=(.+)$/m', $envContent, $m)) {
+            $dbHost = bc_parse_env_value($m[1]);
+        }
+        if (preg_match('/^DB_PORT=(.+)$/m', $envContent, $m)) {
+            $dbPort = bc_parse_env_value($m[1]);
+        }
+        if (preg_match('/^DB_DATABASE=(.+)$/m', $envContent, $m)) {
+            $dbName = bc_parse_env_value($m[1]);
+        }
+        if (preg_match('/^DB_USERNAME=(.+)$/m', $envContent, $m)) {
+            $dbUser = bc_parse_env_value($m[1]);
+        }
+        if (preg_match('/^DB_PASSWORD=(.+)$/m', $envContent, $m)) {
+            $dbPass = bc_parse_env_value($m[1]);
+        }
+
+        $database[] = bc_check('DB_HOST', true, $dbHost.':'.$dbPort);
+        $database[] = bc_check('DB_DATABASE', ! empty($dbName), $dbName ?: 'NOT SET');
+
+        // Check PDO driver availability
+        $pdoDriver = $dbConnection === 'pgsql' ? 'pgsql' : 'mysql';
+        $pdoAvailable = in_array($pdoDriver, PDO::getAvailableDrivers(), true);
+        $database[] = bc_check("PDO {$pdoDriver} driver", $pdoAvailable, $pdoAvailable ? 'Available' : 'MISSING', "Install php-{$pdoDriver} extension");
+
+        if ($pdoAvailable && $dbName) {
+            try {
+                if ($pdoDriver === 'pgsql') {
+                    $dsn = "pgsql:host={$dbHost};port={$dbPort};dbname={$dbName};connect_timeout=3";
+                } else {
+                    $dsn = "mysql:host={$dbHost};port={$dbPort};dbname={$dbName};charset=utf8mb4";
+                }
+
+                $pdo = new PDO($dsn, $dbUser, $dbPass, [
+                    PDO::ATTR_TIMEOUT => 3,
+                    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                ]);
+                $database[] = bc_check('Connection', true, 'Connected');
+
+                // Count and check key tables
+                if ($pdoDriver === 'pgsql') {
+                    $stmt = $pdo->query("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename");
+                } else {
+                    $stmt = $pdo->query('SHOW TABLES');
+                }
+                $tables = $stmt->fetchAll(PDO::FETCH_COLUMN);
+                $tableCount = count($tables);
+                $database[] = bc_check('Tables found', $tableCount > 0, $tableCount.' table(s)', $tableCount === 0 ? 'Run migrations' : '', $tableCount === 0 ? 'run_migrate' : '');
+
+                $keyTables = ['migrations', 'sessions', 'cache', 'users'];
+                foreach ($keyTables as $t) {
+                    $exists = in_array($t, $tables, true);
+                    $database[] = bc_check("Table: {$t}", $exists, $exists ? 'Exists' : 'MISSING', 'Run migrations', $exists ? '' : 'run_migrate');
+                }
+            } catch (Throwable $e) {
+                $errMsg = $e->getMessage();
+                if (strlen($errMsg) > 120) {
+                    $errMsg = substr($errMsg, 0, 120).'...';
+                }
+                $database[] = bc_check('Connection', false, $errMsg);
+            }
+        }
+    } else {
+        $database[] = bc_check('Driver support', true, "{$dbConnection} — not tested by diagnostics");
+    }
+} elseif ($basePath) {
+    $database[] = bc_check('Database config', false, 'No .env file found', 'Create .env first');
+}
+
+// ================================================================
+//  Section 4: Web Server & Public Directory
 // ================================================================
 $webserver = [];
 
 if ($basePath) {
     // public/index.php
-    $indexExists = file_exists($basePath . '/public/index.php');
+    $indexExists = file_exists($basePath.'/public/index.php');
     $webserver[] = bc_check('public/index.php', $indexExists, $indexExists ? 'Found' : 'MISSING (all routes broken)', 'Restore from laravel/laravel repository');
 
     // .htaccess
-    $htaccessPath = $basePath . '/public/.htaccess';
+    $htaccessPath = $basePath.'/public/.htaccess';
     if (file_exists($htaccessPath)) {
         $htaccessContent = file_get_contents($htaccessPath);
         $hasRewriteEngine = (bool) preg_match('/RewriteEngine\s+On/i', $htaccessContent);
@@ -550,7 +821,7 @@ if ($basePath) {
     }
 
     // public/hot (Vite dev leftover)
-    $hotExists = file_exists($basePath . '/public/hot');
+    $hotExists = file_exists($basePath.'/public/hot');
     if ($hotExists) {
         $webserver[] = bc_check('public/hot', false, 'EXISTS (Vite dev leftover — breaks asset URLs in production)', 'Delete public/hot', 'remove_hot');
     } else {
@@ -558,9 +829,9 @@ if ($basePath) {
     }
 
     // public/build/ (Vite built assets)
-    $buildDir = $basePath . '/public/build';
+    $buildDir = $basePath.'/public/build';
     if (is_dir($buildDir)) {
-        $manifestExists = file_exists($buildDir . '/manifest.json');
+        $manifestExists = file_exists($buildDir.'/manifest.json');
         if ($manifestExists) {
             $webserver[] = bc_check('public/build/', true, 'Found with manifest.json');
         } else {
@@ -568,13 +839,13 @@ if ($basePath) {
         }
     } else {
         // Only flag if package.json exists (app uses frontend build)
-        if (file_exists($basePath . '/package.json')) {
+        if (file_exists($basePath.'/package.json')) {
             $webserver[] = bc_check('public/build/', false, 'MISSING (no built frontend assets)', 'Run npm install && npm run build');
         }
     }
 
     // public/storage symlink
-    $publicStorage = $basePath . '/public/storage';
+    $publicStorage = $basePath.'/public/storage';
     if (is_link($publicStorage)) {
         $webserver[] = bc_check('public/storage symlink', true, 'Linked');
     } else {
@@ -583,41 +854,41 @@ if ($basePath) {
 }
 
 // ================================================================
-//  Section 4: File & Directory Permissions
+//  Section 5: File & Directory Permissions
 // ================================================================
 $permissions = [];
 
 if ($basePath) {
     $writables = [
-        'storage'                    => '/storage',
-        'storage/app'                => '/storage/app',
-        'storage/app/public'         => '/storage/app/public',
-        'storage/framework'          => '/storage/framework',
+        'storage' => '/storage',
+        'storage/app' => '/storage/app',
+        'storage/app/public' => '/storage/app/public',
+        'storage/framework' => '/storage/framework',
         'storage/framework/sessions' => '/storage/framework/sessions',
-        'storage/framework/views'    => '/storage/framework/views',
-        'storage/framework/cache'    => '/storage/framework/cache',
-        'storage/logs'               => '/storage/logs',
-        'bootstrap/cache'            => '/bootstrap/cache',
+        'storage/framework/views' => '/storage/framework/views',
+        'storage/framework/cache' => '/storage/framework/cache',
+        'storage/logs' => '/storage/logs',
+        'bootstrap/cache' => '/bootstrap/cache',
     ];
     foreach ($writables as $label => $dir) {
-        $permissions[] = bc_check_writable($basePath . $dir, $label);
+        $permissions[] = bc_check_writable($basePath.$dir, $label);
     }
 
     // Check public/ is readable (not writable check — just accessible)
-    $publicReadable = is_readable($basePath . '/public');
+    $publicReadable = is_readable($basePath.'/public');
     $permissions[] = bc_check('public/ (readable)', $publicReadable, $publicReadable ? 'Readable' : 'NOT READABLE', 'chmod 755 public');
 }
 
 // ================================================================
-//  Section 5: Browser Console Package
+//  Section 6: Browser Console Package
 // ================================================================
 $package = [];
 
 if ($basePath) {
-    $pkgInstalled = is_dir($basePath . '/vendor/codenzia/browser-console');
+    $pkgInstalled = is_dir($basePath.'/vendor/codenzia/browser-console');
     $package[] = bc_check('Package installed', $pkgInstalled, $pkgInstalled ? 'Found' : 'NOT FOUND', 'composer require codenzia/browser-console');
 
-    $configPublished = file_exists($basePath . '/config/browser-console.php');
+    $configPublished = file_exists($basePath.'/config/browser-console.php');
     $package[] = bc_check('Config published', $configPublished, $configPublished ? 'Found' : 'NOT PUBLISHED', 'php artisan vendor:publish --tag=browser-console-config');
 
     if ($envContent) {
@@ -625,55 +896,55 @@ if ($basePath) {
         $package[] = bc_check('BROWSER_CONSOLE_PASSWORD', ! empty($envPasswordHash), $envPasswordHash ? 'Set' : 'NOT SET', 'php artisan browser-console:create');
     }
 
-    $lwInstalled = is_dir($basePath . '/vendor/livewire/livewire');
+    $lwInstalled = is_dir($basePath.'/vendor/livewire/livewire');
     $package[] = bc_check('Livewire installed', $lwInstalled, $lwInstalled ? 'Found' : 'NOT FOUND', 'composer require livewire/livewire');
 }
 
 // ================================================================
-//  Section 6: Laravel Boot Test (opt-in via ?boot=1)
+//  Section 7: Laravel Boot Test (opt-in via ?boot=1)
 // ================================================================
 $bootRequested = isset($_GET['boot']);
 $bootResult = null;
 $bootError = null;
 $bootErrorFile = null;
 
-if ($bootRequested && $basePath && file_exists($basePath . '/vendor/autoload.php')) {
+if ($bootRequested && $basePath && file_exists($basePath.'/vendor/autoload.php')) {
     ob_start();
 
     try {
-        require $basePath . '/vendor/autoload.php';
-        $app = require $basePath . '/bootstrap/app.php';
-        $kernel = $app->make(\Illuminate\Contracts\Http\Kernel::class);
+        require $basePath.'/vendor/autoload.php';
+        $app = require $basePath.'/bootstrap/app.php';
+        $kernel = $app->make(Illuminate\Contracts\Http\Kernel::class);
         $app->boot();
 
-        $bootResult = 'Laravel booted successfully (' . $app->version() . ')';
+        $bootResult = 'Laravel booted successfully ('.$app->version().')';
 
         // Check if console route is registered
         try {
             $consolePath = $app->make('config')->get('browser-console.path', 'console');
             $router = $app->make('router');
             $routes = $router->getRoutes();
-            $testRequest = \Illuminate\Http\Request::create('/' . $consolePath, 'GET');
+            $testRequest = Request::create('/'.$consolePath, 'GET');
             $matched = $routes->match($testRequest);
 
             if ($matched) {
                 $bootResult .= " | Route '/{$consolePath}' registered";
             }
-        } catch (\Throwable $routeErr) {
-            $bootResult .= ' | Route check failed: ' . $routeErr->getMessage();
+        } catch (Throwable $routeErr) {
+            $bootResult .= ' | Route check failed: '.$routeErr->getMessage();
         }
-    } catch (\Throwable $e) {
-        $bootError = get_class($e) . ': ' . $e->getMessage();
+    } catch (Throwable $e) {
+        $bootError = get_class($e).': '.$e->getMessage();
 
         // Show relative paths only — never expose absolute server paths
-        $bootErrorFile = str_replace($basePath . '/', '', $e->getFile()) . ':' . $e->getLine();
+        $bootErrorFile = str_replace($basePath.'/', '', $e->getFile()).':'.$e->getLine();
 
         // Collect the trace (first 5 frames, relative paths only)
         $trace = [];
         foreach (array_slice($e->getTrace(), 0, 5) as $frame) {
-            $file = isset($frame['file']) ? str_replace($basePath . '/', '', $frame['file']) : '(internal)';
+            $file = isset($frame['file']) ? str_replace($basePath.'/', '', $frame['file']) : '(internal)';
             $line = $frame['line'] ?? '?';
-            $call = ($frame['class'] ?? '') . ($frame['type'] ?? '') . ($frame['function'] ?? '?');
+            $call = ($frame['class'] ?? '').($frame['type'] ?? '').($frame['function'] ?? '?');
             $trace[] = "{$file}:{$line} {$call}()";
         }
     }
@@ -685,7 +956,7 @@ if ($bootRequested && $basePath && file_exists($basePath . '/vendor/autoload.php
 //  Count results
 // ================================================================
 $totalFails = 0;
-$allSections = [$php, $structure, $webserver, $permissions, $package];
+$allSections = [$php, $structure, $database, $webserver, $permissions, $package];
 foreach ($allSections as $group) {
     foreach ($group as $c) {
         if (! $c['pass']) {
@@ -761,82 +1032,84 @@ $statusText = $totalFails === 0 ? 'ALL CHECKS PASSED' : "{$totalFails} ISSUE(S) 
         <a href="?logout" class="logout">Logout</a>
     </div>
 
-    <?php if ($fixMessage): ?>
+    <?php if ($fixMessage) { ?>
         <div class="flash <?= $fixSuccess ? 'flash-ok' : 'flash-err' ?>">
             <?= htmlspecialchars($fixMessage) ?>
         </div>
-    <?php endif; ?>
+    <?php } ?>
 
     <?php
     $sections = [
-        'PHP Environment'            => $php,
-        'Laravel Structure'          => $structure,
-        'Web Server & Public'        => $webserver,
+        'PHP Environment' => $php,
+        'Laravel Structure' => $structure,
+        'Database' => $database,
+        'Web Server & Public' => $webserver,
         'File & Directory Permissions' => $permissions,
-        'Browser Console Package'    => $package,
+        'Browser Console Package' => $package,
     ];
 
-    foreach ($sections as $title => $checks):
-        if (empty($checks)) {
-            continue;
-        }
-    ?>
+foreach ($sections as $title => $checks) {
+    if (empty($checks)) {
+        continue;
+    } ?>
         <div class="section">
             <div class="section-title"><?= $title ?></div>
-            <?php foreach ($checks as $c): ?>
+            <?php foreach ($checks as $c) { ?>
                 <div class="row">
                     <span class="icon <?= $c['pass'] ? 'pass' : 'fail' ?>"><?= $c['pass'] ? '&#10004;' : '&#10008;' ?></span>
                     <span class="label"><?= htmlspecialchars($c['label']) ?></span>
                     <span class="detail">
                         <?= htmlspecialchars($c['detail']) ?>
-                        <?php if (! $c['pass'] && $c['fix'] && ! $c['fixId']): ?>
+                        <?php if (! $c['pass'] && $c['fix'] && ! $c['fixId']) { ?>
                             <span class="fix">&rarr; <?= htmlspecialchars($c['fix']) ?></span>
-                        <?php endif; ?>
+                        <?php } ?>
                     </span>
-                    <?php if ($c['fixId'] && isset($fixActions[$c['fixId']])): ?>
+                    <?php if ($c['fixId'] && isset($fixActions[$c['fixId']])) { ?>
                         <form method="POST" style="display:inline; margin:0;">
+                            <input type="hidden" name="_token" value="<?= $_SESSION['bcd_csrf'] ?>">
                             <input type="hidden" name="fix" value="<?= htmlspecialchars($c['fixId']) ?>">
                             <button type="submit" class="fix-btn <?= $c['pass'] ? 'warn' : '' ?>"><?= $c['pass'] ? 'Clear' : 'Fix' ?></button>
                         </form>
-                    <?php endif; ?>
+                    <?php } ?>
                 </div>
-            <?php endforeach; ?>
+            <?php } ?>
         </div>
-    <?php endforeach; ?>
+    <?php
+} ?>
 
     <!-- Laravel Boot Test -->
     <div class="section">
         <div class="section-title">Laravel Boot Test</div>
         <div style="padding: 12px 16px;">
-            <?php if (! $bootRequested): ?>
+            <?php if (! $bootRequested) { ?>
                 <p style="color: #94a3b8; margin-bottom: 10px; font-size: 13px;">
                     Attempts to bootstrap Laravel and reports the exact error. This is the most useful check for diagnosing 500 errors.
                 </p>
                 <a href="?boot=1" class="boot-btn">Run Boot Test</a>
-            <?php elseif ($bootResult): ?>
+            <?php } elseif ($bootResult) { ?>
                 <div class="boot-ok"><?= htmlspecialchars($bootResult) ?></div>
-            <?php elseif ($bootError): ?>
+            <?php } elseif ($bootError) { ?>
                 <div class="boot-err">
                     <div class="error-msg"><?= htmlspecialchars($bootError) ?></div>
-                    <?php if ($bootErrorFile): ?>
+                    <?php if ($bootErrorFile) { ?>
                         <div class="error-file">at <?= htmlspecialchars($bootErrorFile) ?></div>
-                    <?php endif; ?>
-                    <?php if (! empty($trace)): ?>
+                    <?php } ?>
+                    <?php if (! empty($trace)) { ?>
                         <div class="trace">
-                            <?php foreach ($trace as $frame): ?>
+                            <?php foreach ($trace as $frame) { ?>
                                 <div><?= htmlspecialchars($frame) ?></div>
-                            <?php endforeach; ?>
+                            <?php } ?>
                         </div>
-                    <?php endif; ?>
+                    <?php } ?>
                 </div>
-                <?php if (! empty($bootOutput)): ?>
+                <?php if (! empty($bootOutput)) { ?>
                     <pre style="margin-top: 10px; color: #6b7280; font-size: 11px; white-space: pre-wrap;"><?= htmlspecialchars(substr($bootOutput, 0, 2000)) ?></pre>
-                <?php endif; ?>
-            <?php else: ?>
+                <?php } ?>
+            <?php } else { ?>
                 <div class="boot-err">
                     <div class="error-msg">Could not attempt boot: vendor/autoload.php not found.</div>
                 </div>
-            <?php endif; ?>
+            <?php } ?>
         </div>
     </div>
 

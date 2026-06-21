@@ -71,7 +71,7 @@ class CreateAccessCommand extends Command
     private function setEnvValue(string $key, string $value): void
     {
         $envFile = app()->environmentFilePath();
-        $content = file_get_contents($envFile);
+        $content = file_exists($envFile) ? (file_get_contents($envFile) ?: '') : '';
 
         // Wrap in single quotes to prevent $variable expansion in .env
         $quotedValue = str_contains($value, '$') || str_contains($value, ' ')
@@ -84,7 +84,7 @@ class CreateAccessCommand extends Command
             // Use str_replace to avoid $ backreference issues in preg_replace
             $content = str_replace($matches[0], $newLine, $content);
         } else {
-            $content = rtrim($content) . "\n{$newLine}\n";
+            $content = rtrim($content)."\n{$newLine}\n";
         }
 
         file_put_contents($envFile, $content);

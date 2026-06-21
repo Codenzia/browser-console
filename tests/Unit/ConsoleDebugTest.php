@@ -95,7 +95,8 @@ it('serializes array values', function () {
 });
 
 it('serializes objects with toArray method', function () {
-    $obj = new class {
+    $obj = new class
+    {
         public function toArray(): array
         {
             return ['name' => 'test', 'count' => 5];

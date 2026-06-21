@@ -11,6 +11,15 @@ beforeEach(function () {
     config()->set('browser-console.password', $hash);
 });
 
+/**
+ * Mark the current request as authenticated for the browser console.
+ * Mirrors ConsoleAuth::login()'s in-request state binding.
+ */
+function actingAsConsole(): void
+{
+    app()->instance('browser-console.auth.pending', true);
+}
+
 it('mounts with default state', function () {
     Livewire::test(BrowserConsole::class)
         ->assertSet('mode', 'artisan')
@@ -23,6 +32,8 @@ it('mounts with default state', function () {
 });
 
 it('switches between modes', function () {
+    actingAsConsole();
+
     $component = Livewire::test(BrowserConsole::class);
 
     $component->call('switchMode', 'shell')
@@ -41,6 +52,8 @@ it('switches between modes', function () {
 });
 
 it('rejects invalid mode', function () {
+    actingAsConsole();
+
     Livewire::test(BrowserConsole::class)
         ->call('switchMode', 'invalid')
         ->assertSet('mode', 'artisan'); // Should remain default
@@ -53,7 +66,7 @@ it('fills command from reference panel', function () {
 });
 
 it('clears history', function () {
-    session(['console_authenticated' => true, 'console_last_activity' => time()]);
+    actingAsConsole();
 
     Livewire::test(BrowserConsole::class)
         ->call('clearHistory')
@@ -68,7 +81,7 @@ it('blocks command execution when not authenticated', function () {
 });
 
 it('does not run empty commands', function () {
-    session(['console_authenticated' => true, 'console_last_activity' => time()]);
+    actingAsConsole();
 
     Livewire::test(BrowserConsole::class)
         ->set('command', '')
@@ -77,7 +90,7 @@ it('does not run empty commands', function () {
 });
 
 it('returns command reference groups', function () {
-    $component = new BrowserConsole();
+    $component = new BrowserConsole;
     $component->mount();
     $groups = $component->getCommandReference();
 
@@ -86,7 +99,7 @@ it('returns command reference groups', function () {
 });
 
 it('returns shell command reference groups', function () {
-    $component = new BrowserConsole();
+    $component = new BrowserConsole;
     $groups = $component->getShellCommandReference();
 
     expect($groups)->toBeArray()
@@ -94,7 +107,7 @@ it('returns shell command reference groups', function () {
 });
 
 it('returns deployment guide', function () {
-    $component = new BrowserConsole();
+    $component = new BrowserConsole;
     $guide = $component->getDeploymentGuide();
 
     expect($guide)->toBeArray()
@@ -102,7 +115,7 @@ it('returns deployment guide', function () {
 });
 
 it('filters command reference by search term', function () {
-    $component = new BrowserConsole();
+    $component = new BrowserConsole;
     $component->mount();
     $component->commandSearch = 'migrate';
     $filtered = $component->getFilteredCommandReference();
@@ -120,7 +133,7 @@ it('filters command reference by search term', function () {
 });
 
 it('returns all commands when search is empty', function () {
-    $component = new BrowserConsole();
+    $component = new BrowserConsole;
     $component->mount();
     $component->commandSearch = '';
 
@@ -139,7 +152,7 @@ it('loads logs when switching to logs mode', function () {
 
     File::put($logPath, "[2024-01-15 10:30:00] local.ERROR: Test error message\n");
 
-    session(['console_authenticated' => true, 'console_last_activity' => time()]);
+    actingAsConsole();
 
     Livewire::test(BrowserConsole::class)
         ->call('switchMode', 'logs')
@@ -159,7 +172,9 @@ it('clears log file', function () {
 
     File::put($logPath, "Some log content\n");
 
-    $component = new BrowserConsole();
+    actingAsConsole();
+
+    $component = new BrowserConsole;
     $component->clearLog();
 
     expect(File::get($logPath))->toBe('')
@@ -176,13 +191,71 @@ it('handles missing log file gracefully', function () {
         File::delete($logPath);
     }
 
-    $component = new BrowserConsole();
+    actingAsConsole();
+
+    $component = new BrowserConsole;
     $component->loadLogs();
 
     expect($component->logEntries)->toBe([]);
 });
 
+it('reads tail of large log files without loading entire file', function () {
+    $logPath = storage_path('logs/laravel.log');
+    $logDir = dirname($logPath);
+
+    if (! is_dir($logDir)) {
+        mkdir($logDir, 0755, true);
+    }
+
+    // Write a log file larger than the 256KB small-file threshold
+    $handle = fopen($logPath, 'w');
+    for ($i = 0; $i < 2000; $i++) {
+        $line = sprintf("[2024-01-15 10:%02d:%02d] local.ERROR: Test error message number %d\n", intdiv($i, 60) % 60, $i % 60, $i);
+        // Pad each line to ~200 bytes to exceed 256KB
+        fwrite($handle, $line.str_repeat(' ', 150)."\n");
+    }
+    fclose($handle);
+
+    expect(filesize($logPath))->toBeGreaterThan(262144); // > 256KB
+
+    actingAsConsole();
+
+    $component = new BrowserConsole;
+    $component->logLines = 50;
+    $component->logLevel = 'all';
+    $component->loadLogs();
+
+    // Should have parsed entries from the tail, not OOM from loading the whole file
+    expect($component->logEntries)->toBeArray()
+        ->and(count($component->logEntries))->toBeLessThanOrEqual(50)
+        ->and(count($component->logEntries))->toBeGreaterThan(0);
+
+    // Clean up
+    File::delete($logPath);
+});
+
 it('renders the browser console view', function () {
     Livewire::test(BrowserConsole::class)
         ->assertStatus(200);
+});
+
+it('rejects log/debug actions when not authenticated', function () {
+    // No actingAsConsole() — these must be gated behind authentication.
+    foreach (['loadLogs', 'clearLog', 'loadDebugEntries', 'clearDebugEntries', 'clearHistory'] as $method) {
+        Livewire::test(BrowserConsole::class)
+            ->call($method)
+            ->assertForbidden();
+    }
+});
+
+it('rejects switchMode when not authenticated', function () {
+    Livewire::test(BrowserConsole::class)
+        ->call('switchMode', 'logs')
+        ->assertForbidden();
+});
+
+it('rejects downloadLog when not authenticated', function () {
+    Livewire::test(BrowserConsole::class)
+        ->call('downloadLog')
+        ->assertForbidden();
 });

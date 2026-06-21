@@ -3,6 +3,7 @@
 use Codenzia\BrowserConsole\BrowserConsoleServiceProvider;
 use Codenzia\BrowserConsole\Http\Middleware\ConsoleGate;
 use Illuminate\Support\Facades\Route;
+use Livewire\Livewire;
 
 it('registers the service provider', function () {
     expect(app()->getProviders(BrowserConsoleServiceProvider::class))
@@ -33,7 +34,7 @@ it('uses configurable path for the route', function () {
 it('publishes the config file', function () {
     $configPath = config_path('browser-console.php');
 
-    expect(file_exists(__DIR__ . '/../../config/browser-console.php'))->toBeTrue();
+    expect(file_exists(__DIR__.'/../../config/browser-console.php'))->toBeTrue();
 });
 
 it('loads package config with defaults', function () {
@@ -44,14 +45,14 @@ it('loads package config with defaults', function () {
 });
 
 it('registers artisan commands', function () {
-    expect(array_keys(\Artisan::all()))
+    expect(array_keys(Artisan::all()))
         ->toContain('browser-console:create')
         ->toContain('browser-console:show')
         ->toContain('browser-console:diagnose');
 });
 
 it('registers ConsoleGate as Livewire persistent middleware', function () {
-    $persistent = \Livewire\Livewire::getPersistentMiddleware();
+    $persistent = Livewire::getPersistentMiddleware();
 
     expect($persistent)->toContain(ConsoleGate::class);
 });
@@ -64,7 +65,7 @@ it('does not auto-publish bcd.php on boot', function () {
         unlink($destination);
     }
 
-    $provider = new \Codenzia\BrowserConsole\BrowserConsoleServiceProvider(app());
+    $provider = new BrowserConsoleServiceProvider(app());
     $provider->packageBooted();
 
     // bcd.php should NOT be auto-published — it's opt-in during install

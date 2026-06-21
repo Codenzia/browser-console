@@ -18,7 +18,7 @@ class TestCase extends Orchestra
 
     public function getEnvironmentSetUp($app): void
     {
-        config()->set('app.key', 'base64:' . base64_encode(str_repeat('a', 32)));
+        config()->set('app.key', 'base64:'.base64_encode(str_repeat('a', 32)));
         config()->set('session.driver', 'file');
         config()->set('browser-console.user', 'testuser');
         config()->set('browser-console.password', '$2y$12$BxjppjcpMnSeq34CRScXV.RIkzsJYJuqPr17JKXD9n3GZluM4thIy');

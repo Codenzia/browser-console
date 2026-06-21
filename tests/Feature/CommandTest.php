@@ -96,7 +96,7 @@ it('diagnose command runs without errors', function () {
 });
 
 it('diagnose command registers the diagnose command', function () {
-    expect(array_keys(\Artisan::all()))
+    expect(array_keys(Artisan::all()))
         ->toContain('browser-console:diagnose');
 });
 

@@ -41,6 +41,15 @@ class ConsoleAuth
             return false;
         }
 
+        // Bind the cookie to the current password hash. Rotating the password
+        // (e.g. after a suspected compromise) changes the fingerprint and
+        // invalidates every outstanding auth cookie on the next request.
+        if (($payload['pw'] ?? null) !== static::passwordFingerprint()) {
+            static::logout();
+
+            return false;
+        }
+
         $timeout = (int) config('browser-console.session_timeout', 1800);
         $lastActivity = $payload['last_activity'] ?? 0;
 
@@ -75,9 +84,20 @@ class ConsoleAuth
     }
 
     /**
+     * Short fingerprint of the current console password hash.
+     *
+     * Embedded in the auth cookie and re-checked on every request so that
+     * rotating BROWSER_CONSOLE_PASSWORD invalidates all prior sessions.
+     */
+    private static function passwordFingerprint(): string
+    {
+        return substr(hash('sha256', (string) config('browser-console.password')), 0, 16);
+    }
+
+    /**
      * Read and decode the auth cookie from the request.
      *
-     * @return array{authenticated: bool, last_activity: int}|null
+     * @return array{authenticated: bool, last_activity: int, pw?: string}|null
      */
     private static function readCookie(Request $request): ?array
     {
@@ -104,6 +124,7 @@ class ConsoleAuth
         $payload = json_encode([
             'authenticated' => $authenticated,
             'last_activity' => time(),
+            'pw' => static::passwordFingerprint(),
         ]);
 
         $timeout = (int) config('browser-console.session_timeout', 1800);

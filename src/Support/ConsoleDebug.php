@@ -46,7 +46,7 @@ class ConsoleDebug
         $frame = $trace[2] ?? $trace[1] ?? $trace[0];
 
         $this->caller = [
-            'file' => isset($frame['file']) ? str_replace(base_path() . '/', '', str_replace('\\', '/', $frame['file'])) : 'unknown',
+            'file' => isset($frame['file']) ? str_replace(base_path().'/', '', str_replace('\\', '/', $frame['file'])) : 'unknown',
             'line' => $frame['line'] ?? 0,
             'function' => $frame['function'] ?? null,
             'class' => $frame['class'] ?? null,
@@ -140,7 +140,7 @@ class ConsoleDebug
 
         @file_put_contents(
             $logPath,
-            json_encode($entry, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n",
+            json_encode($entry, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)."\n",
             FILE_APPEND | LOCK_EX,
         );
     }
@@ -154,12 +154,12 @@ class ConsoleDebug
         }
 
         $kept = array_slice($lines, -self::PRUNE_KEEP);
-        @file_put_contents($logPath, implode("\n", $kept) . "\n", LOCK_EX);
+        @file_put_contents($logPath, implode("\n", $kept)."\n", LOCK_EX);
     }
 
     private function logPath(): string
     {
-        return storage_path('logs/' . self::LOG_FILE);
+        return storage_path('logs/'.self::LOG_FILE);
     }
 
     /** @return array{type: string, value: mixed} */
@@ -200,14 +200,14 @@ class ConsoleDebug
 
         foreach ($data as $key => $value) {
             if ($count >= 50) {
-                $result['…'] = '(' . count($data) . ' total items)';
+                $result['…'] = '('.count($data).' total items)';
                 break;
             }
 
             if (is_array($value)) {
                 $result[$key] = $this->truncateDeep($value, $maxDepth, $depth + 1);
             } elseif (is_string($value) && strlen($value) > 1000) {
-                $result[$key] = substr($value, 0, 1000) . '…';
+                $result[$key] = substr($value, 0, 1000).'…';
             } else {
                 $result[$key] = $value;
             }

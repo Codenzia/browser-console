@@ -4,13 +4,17 @@ declare(strict_types=1);
 
 namespace Codenzia\BrowserConsole\Livewire;
 
+use Codenzia\BrowserConsole\Support\Audit;
 use Codenzia\BrowserConsole\Support\ConsoleAuth;
 use Illuminate\Contracts\View\View;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Str;
+use Livewire\Attributes\Locked;
 use Livewire\Component;
+use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Process\Exception\ProcessTimedOutException;
 use Symfony\Component\Process\Process;
 
@@ -31,6 +35,7 @@ class BrowserConsole extends Component
     public bool $isRunning = false;
 
     /** @var array<int, array{command: string, output: string, status: string, timestamp: string, mode: string}> */
+    #[Locked]
     public array $history = [];
 
     // Log viewer
@@ -39,6 +44,7 @@ class BrowserConsole extends Component
     public string $logLevel = 'all';
 
     /** @var array<int, array{timestamp: string, level: string, message: string}> */
+    #[Locked]
     public array $logEntries = [];
 
     // Reference panel
@@ -48,6 +54,7 @@ class BrowserConsole extends Component
 
     // Debug viewer
     /** @var array<int, array{id: string, ts: string, type: string, values: array, label: ?string, color: string, caller: array}> */
+    #[Locked]
     public array $debugEntries = [];
 
     /** Cached command reference — built once in mount(), avoids Artisan::all() on every XHR. */
@@ -75,27 +82,89 @@ class BrowserConsole extends Component
         return ConsoleAuth::check(request());
     }
 
+    /**
+     * Abort the Livewire request unless the caller is authenticated.
+     * Use on every action that reads or mutates server-side data.
+     */
+    private function ensureAuthenticated(): void
+    {
+        if (! $this->isAuthenticated) {
+            abort(Response::HTTP_FORBIDDEN, 'Console authentication required.');
+        }
+    }
+
     public function authenticate(): void
     {
         $configUser = config('browser-console.user');
         $configPassword = config('browser-console.password');
 
         if (! $configUser || ! $configPassword) {
-            $this->loginError = __('Console access not configured. Run: php artisan browser-console:create');
+            $this->loginError = 'Console access not configured. Run: php artisan browser-console:create';
+            Audit::event('console.login.failed', $this->loginAuditContext('not_configured'));
 
             return;
         }
 
-        if ($this->username !== $configUser || ! Hash::check($this->password, $configPassword)) {
-            $this->loginError = __('Invalid credentials.');
+        // Dedicated per-IP brute-force limiter (independent of the route throttle
+        // so legitimate command/poll traffic is never penalised). 5 attempts/min.
+        $limiterKey = $this->loginRateLimiterKey();
+        if (RateLimiter::tooManyAttempts($limiterKey, 5)) {
+            $seconds = RateLimiter::availableIn($limiterKey);
+            $this->loginError = "Too many login attempts. Try again in {$seconds} second(s).";
             $this->password = '';
+            Audit::event('console.login.failed', $this->loginAuditContext('rate_limited'));
 
             return;
         }
 
+        // Constant-time comparison of both username and password. Always run
+        // Hash::check so the timing profile does not reveal whether the username
+        // matched (mitigates username enumeration — see LOW-01).
+        $userOk = hash_equals((string) $configUser, $this->username);
+        $passOk = Hash::check($this->password, (string) $configPassword);
+
+        if (! $userOk || ! $passOk) {
+            RateLimiter::hit($limiterKey, 60);
+            $this->loginError = 'Invalid credentials.';
+            $this->password = '';
+            Audit::event('console.login.failed', $this->loginAuditContext('bad_password'));
+
+            return;
+        }
+
+        RateLimiter::clear($limiterKey);
         ConsoleAuth::login();
         $this->username = '';
         $this->password = '';
+        Audit::event('console.login.success', $this->loginAuditContext());
+    }
+
+    /**
+     * Rate-limiter key for login attempts, scoped to the requesting IP.
+     */
+    private function loginRateLimiterKey(): string
+    {
+        return 'browser-console:login:'.(request()?->ip() ?? 'unknown');
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function loginAuditContext(?string $reason = null): array
+    {
+        $request = request();
+
+        $context = [
+            'ip' => $request?->ip(),
+            'user_agent' => $request?->userAgent(),
+            'route' => $request?->path(),
+        ];
+
+        if ($reason !== null) {
+            $context['reason'] = $reason;
+        }
+
+        return $context;
     }
 
     public function logout(): void
@@ -107,6 +176,8 @@ class BrowserConsole extends Component
 
     public function switchMode(string $mode): void
     {
+        $this->ensureAuthenticated();
+
         if (in_array($mode, ['artisan', 'shell', 'logs', 'debug'], true)) {
             $this->mode = $mode;
             $this->command = '';
@@ -122,8 +193,13 @@ class BrowserConsole extends Component
         }
     }
 
-    public function fillCommand(string $cmd): void
+    public function fillCommand(string $cmd, string $mode = ''): void
     {
+        // Switch mode only when explicitly requested and different from current
+        if ($mode && $mode !== $this->mode && in_array($mode, ['artisan', 'shell'], true)) {
+            $this->mode = $mode;
+        }
+
         $this->command = $cmd;
     }
 
@@ -156,6 +232,8 @@ class BrowserConsole extends Component
 
     public function clearHistory(): void
     {
+        $this->ensureAuthenticated();
+
         $this->history = [];
     }
 
@@ -171,7 +249,7 @@ class BrowserConsole extends Component
 
             $seeders = $this->discoverSeeders();
             if ($seeders) {
-                $groups[__('Seeders')] = $seeders;
+                $groups['Seeders'] = $seeders;
             }
 
             return $groups;
@@ -191,22 +269,22 @@ class BrowserConsole extends Component
 
         // Define which command groups to show (prefix => display label)
         $groupMap = [
-            'optimize' => __('Cache'),
-            'config' => __('Cache'),
-            'route' => __('Cache'),
-            'view' => __('Cache'),
-            'event' => __('Cache'),
-            'cache' => __('Cache'),
-            'icon' => __('Cache'),
-            'migrate' => __('Database'),
-            'db' => __('Database'),
-            'shield' => __('Permissions'),
-            'queue' => __('Queue'),
-            'storage' => __('System'),
-            'schedule' => __('System'),
-            'about' => __('System'),
-            'up' => __('System'),
-            'down' => __('System'),
+            'optimize' => 'Cache',
+            'config' => 'Cache',
+            'route' => 'Cache',
+            'view' => 'Cache',
+            'event' => 'Cache',
+            'cache' => 'Cache',
+            'icon' => 'Cache',
+            'migrate' => 'Database',
+            'db' => 'Database',
+            'shield' => 'Permissions',
+            'queue' => 'Queue',
+            'storage' => 'System',
+            'schedule' => 'System',
+            'about' => 'System',
+            'up' => 'System',
+            'down' => 'System',
         ];
 
         // Commands with recommended flags for production use
@@ -220,12 +298,12 @@ class BrowserConsole extends Component
 
         // Sort order for groups
         $groupOrder = [
-            __('Cache') => 1,
-            __('Database') => 2,
-            __('Permissions') => 3,
-            __('Queue') => 4,
-            __('System') => 5,
-            __('App') => 6,
+            'Cache' => 1,
+            'Database' => 2,
+            'Permissions' => 3,
+            'Queue' => 4,
+            'System' => 5,
+            'App' => 6,
         ];
 
         $groups = [];
@@ -236,7 +314,7 @@ class BrowserConsole extends Component
 
             // App-specific commands (from App\ namespace)
             if (str_starts_with($className, 'App\\')) {
-                $groupLabel = __('App');
+                $groupLabel = 'App';
             } elseif (isset($groupMap[$prefix])) {
                 $groupLabel = $groupMap[$prefix];
             } elseif (isset($groupMap[$name])) {
@@ -247,7 +325,7 @@ class BrowserConsole extends Component
 
             $displayCommand = $name;
             if (isset($flagOverrides[$name])) {
-                $displayCommand .= ' ' . $flagOverrides[$name];
+                $displayCommand .= ' '.$flagOverrides[$name];
             }
 
             $groups[$groupLabel][] = [
@@ -258,7 +336,7 @@ class BrowserConsole extends Component
 
         // Sort commands within each group alphabetically
         foreach ($groups as &$commands) {
-            usort($commands, fn(array $a, array $b): int => strcmp($a['command'], $b['command']));
+            usort($commands, fn (array $a, array $b): int => strcmp($a['command'], $b['command']));
         }
 
         // Sort groups by defined order
@@ -286,10 +364,10 @@ class BrowserConsole extends Component
         // Default seeder (runs DatabaseSeeder)
         $seeders[] = [
             'command' => 'db:seed --force',
-            'description' => __('Run default DatabaseSeeder'),
+            'description' => 'Run default DatabaseSeeder',
         ];
 
-        $files = glob($seederPath . '/*Seeder.php') ?: [];
+        $files = glob($seederPath.'/*Seeder.php') ?: [];
 
         foreach ($files as $file) {
             $className = pathinfo($file, PATHINFO_FILENAME);
@@ -304,7 +382,7 @@ class BrowserConsole extends Component
             $label = Str::headline($label);
 
             $seeders[] = [
-                'command' => 'db:seed --force --class=' . $className,
+                'command' => 'db:seed --force --class='.$className,
                 'description' => $label,
             ];
         }
@@ -316,42 +394,42 @@ class BrowserConsole extends Component
     public function getShellCommandReference(): array
     {
         return [
-            __('Composer') => [
-                ['command' => 'composer install --no-dev', 'description' => __('Install production dependencies')],
-                ['command' => 'composer update --no-dev', 'description' => __('Update production dependencies')],
-                ['command' => 'composer require', 'description' => __('Require a new package (add name)')],
-                ['command' => 'composer remove', 'description' => __('Remove a package (add name)')],
-                ['command' => 'composer dump-autoload -o', 'description' => __('Optimize autoloader')],
-                ['command' => 'composer show --installed', 'description' => __('List installed packages')],
-                ['command' => 'composer diagnose', 'description' => __('Diagnose common issues')],
+            'Composer' => [
+                ['command' => 'composer install --no-dev', 'description' => 'Install production dependencies'],
+                ['command' => 'composer update --no-dev', 'description' => 'Update production dependencies'],
+                ['command' => 'composer require', 'description' => 'Require a new package (add name)'],
+                ['command' => 'composer remove', 'description' => 'Remove a package (add name)'],
+                ['command' => 'composer dump-autoload -o', 'description' => 'Optimize autoloader'],
+                ['command' => 'composer show --installed', 'description' => 'List installed packages'],
+                ['command' => 'composer diagnose', 'description' => 'Diagnose common issues'],
             ],
-            __('Git') => [
-                ['command' => 'git status', 'description' => __('Show working tree status')],
-                ['command' => 'git log --oneline -15', 'description' => __('Show recent commits')],
-                ['command' => 'git pull', 'description' => __('Pull latest changes')],
-                ['command' => 'git diff --stat', 'description' => __('Show changed files summary')],
-                ['command' => 'git branch -a', 'description' => __('List all branches')],
-                ['command' => 'git checkout', 'description' => __('Switch branch (add name)')],
-                ['command' => 'git remote -v', 'description' => __('Show remote URLs')],
+            'Git' => [
+                ['command' => 'git status', 'description' => 'Show working tree status'],
+                ['command' => 'git log --oneline -15', 'description' => 'Show recent commits'],
+                ['command' => 'git pull', 'description' => 'Pull latest changes'],
+                ['command' => 'git diff --stat', 'description' => 'Show changed files summary'],
+                ['command' => 'git branch -a', 'description' => 'List all branches'],
+                ['command' => 'git checkout', 'description' => 'Switch branch (add name)'],
+                ['command' => 'git remote -v', 'description' => 'Show remote URLs'],
             ],
-            __('PHP Info') => [
-                ['command' => 'php -v', 'description' => __('Show PHP version')],
-                ['command' => 'php -m', 'description' => __('List loaded extensions')],
-                ['command' => 'php -i', 'description' => __('Full PHP configuration info')],
-                ['command' => 'which php', 'description' => __('Show PHP binary path')],
+            'PHP Info' => [
+                ['command' => 'php -v', 'description' => 'Show PHP version'],
+                ['command' => 'php -m', 'description' => 'List loaded extensions'],
+                ['command' => 'php -i', 'description' => 'Full PHP configuration info'],
+                ['command' => 'which php', 'description' => 'Show PHP binary path'],
             ],
-            __('System') => [
-                ['command' => 'ls -la', 'description' => __('List files in project root')],
-                ['command' => 'pwd', 'description' => __('Show current directory')],
-                ['command' => 'whoami', 'description' => __('Show current user')],
-                ['command' => 'df -h', 'description' => __('Show disk usage')],
-                ['command' => 'du -sh storage', 'description' => __('Show storage directory size')],
+            'System' => [
+                ['command' => 'ls -la', 'description' => 'List files in project root'],
+                ['command' => 'pwd', 'description' => 'Show current directory'],
+                ['command' => 'whoami', 'description' => 'Show current user'],
+                ['command' => 'df -h', 'description' => 'Show disk usage'],
+                ['command' => 'du -sh storage', 'description' => 'Show storage directory size'],
             ],
-            __('Storage & Symlinks') => [
-                ['command' => 'ls -la public/storage', 'description' => __('Check public storage symlink')],
-                ['command' => 'readlink -f public/storage', 'description' => __('Show symlink target path')],
-                ['command' => 'ls -la storage/app/public', 'description' => __('List storage public files')],
-                ['command' => 'ln -s storage/app/public public/storage', 'description' => __('Create storage symlink')],
+            'Storage & Symlinks' => [
+                ['command' => 'ls -la public/storage', 'description' => 'Check public storage symlink'],
+                ['command' => 'readlink -f public/storage', 'description' => 'Show symlink target path'],
+                ['command' => 'ls -la storage/app/public', 'description' => 'List storage public files'],
+                ['command' => 'ln -s storage/app/public public/storage', 'description' => 'Create storage symlink'],
             ],
         ];
     }
@@ -360,20 +438,20 @@ class BrowserConsole extends Component
     public function getDeploymentGuide(): array
     {
         return [
-            __('Fresh Deployment') => [
-                ['step' => 1, 'command' => 'optimize:clear', 'title' => __('Clear caches'), 'description' => __('Remove all stale cached data from previous deployment'), 'mode' => 'artisan'],
-                ['step' => 2, 'command' => 'migrate --force', 'title' => __('Run migrations'), 'description' => __('Create/update database tables'), 'mode' => 'artisan'],
-                ['step' => 3, 'command' => 'db:seed --force', 'title' => __('Seed database'), 'description' => __('Populate initial data (countries, currencies, etc.)'), 'mode' => 'artisan'],
-                ['step' => 4, 'command' => 'shield:generate --all --panel=admin', 'title' => __('Generate permissions'), 'description' => __('Create RBAC permissions for all resources'), 'mode' => 'artisan'],
-                ['step' => 5, 'command' => 'shield:super-admin', 'title' => __('Create super admin'), 'description' => __('Assign super_admin role to a user'), 'mode' => 'artisan'],
-                ['step' => 6, 'command' => 'storage:link', 'title' => __('Storage symlink'), 'description' => __('Link public/storage to storage/app/public'), 'mode' => 'artisan'],
-                ['step' => 7, 'command' => 'optimize', 'title' => __('Cache for production'), 'description' => __('Cache config, routes, views & events'), 'mode' => 'artisan'],
+            'Fresh Deployment' => [
+                ['step' => 1, 'command' => 'optimize:clear', 'title' => 'Clear caches', 'description' => 'Remove all stale cached data from previous deployment', 'mode' => 'artisan'],
+                ['step' => 2, 'command' => 'migrate --force', 'title' => 'Run migrations', 'description' => 'Create/update database tables', 'mode' => 'artisan'],
+                ['step' => 3, 'command' => 'db:seed --force', 'title' => 'Seed database', 'description' => 'Populate initial data (countries, currencies, etc.)', 'mode' => 'artisan'],
+                ['step' => 4, 'command' => 'shield:generate --all --panel=admin', 'title' => 'Generate permissions', 'description' => 'Create RBAC permissions for all resources', 'mode' => 'artisan'],
+                ['step' => 5, 'command' => 'shield:super-admin', 'title' => 'Create super admin', 'description' => 'Assign super_admin role to a user', 'mode' => 'artisan'],
+                ['step' => 6, 'command' => 'storage:link', 'title' => 'Storage symlink', 'description' => 'Link public/storage to storage/app/public', 'mode' => 'artisan'],
+                ['step' => 7, 'command' => 'optimize', 'title' => 'Cache for production', 'description' => 'Cache config, routes, views & events', 'mode' => 'artisan'],
             ],
-            __('Re-deployment / Update') => [
-                ['step' => 1, 'command' => 'optimize:clear', 'title' => __('Clear caches'), 'description' => __('Must clear old caches before updating'), 'mode' => 'artisan'],
-                ['step' => 2, 'command' => 'migrate --force', 'title' => __('Run migrations'), 'description' => __('Apply any new/pending migrations'), 'mode' => 'artisan'],
-                ['step' => 3, 'command' => 'shield:generate --all --panel=admin', 'title' => __('Sync permissions'), 'description' => __('Regenerate permissions for new/changed resources'), 'mode' => 'artisan'],
-                ['step' => 4, 'command' => 'optimize', 'title' => __('Cache for production'), 'description' => __('Re-cache everything with updated code'), 'mode' => 'artisan'],
+            'Re-deployment / Update' => [
+                ['step' => 1, 'command' => 'optimize:clear', 'title' => 'Clear caches', 'description' => 'Must clear old caches before updating', 'mode' => 'artisan'],
+                ['step' => 2, 'command' => 'migrate --force', 'title' => 'Run migrations', 'description' => 'Apply any new/pending migrations', 'mode' => 'artisan'],
+                ['step' => 3, 'command' => 'shield:generate --all --panel=admin', 'title' => 'Sync permissions', 'description' => 'Regenerate permissions for new/changed resources', 'mode' => 'artisan'],
+                ['step' => 4, 'command' => 'optimize', 'title' => 'Cache for production', 'description' => 'Re-cache everything with updated code', 'mode' => 'artisan'],
             ],
         ];
     }
@@ -395,7 +473,7 @@ class BrowserConsole extends Component
         foreach ($commands as $group => $cmds) {
             $matched = array_filter(
                 $cmds,
-                fn(array $cmd): bool => str_contains(strtolower($cmd['command']), $search)
+                fn (array $cmd): bool => str_contains(strtolower($cmd['command']), $search)
                     || str_contains(strtolower($cmd['description']), $search),
             );
 
@@ -409,6 +487,8 @@ class BrowserConsole extends Component
 
     public function loadLogs(): void
     {
+        $this->ensureAuthenticated();
+
         $logPath = storage_path('logs/laravel.log');
 
         if (! File::exists($logPath)) {
@@ -417,10 +497,10 @@ class BrowserConsole extends Component
             return;
         }
 
-        $lines = file($logPath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
-
-        // Take the last N raw lines to parse
-        $lines = array_slice($lines, - ($this->logLines * 5));
+        // Read only the tail of the file to avoid loading hundreds of MB into memory.
+        // We estimate ~500 bytes per raw line and need logLines*5 raw lines to
+        // produce enough parsed entries after multiline grouping and filtering.
+        $lines = $this->readTailLines($logPath, $this->logLines * 5);
 
         // Parse multiline log entries — each starts with [YYYY-MM-DD HH:MM:SS]
         $entries = [];
@@ -438,7 +518,7 @@ class BrowserConsole extends Component
                 ];
             } elseif ($current !== null) {
                 // Append stack trace / continuation lines
-                $current['message'] .= "\n" . $line;
+                $current['message'] .= "\n".$line;
             }
         }
 
@@ -450,7 +530,7 @@ class BrowserConsole extends Component
         if ($this->logLevel !== 'all') {
             $entries = array_values(array_filter(
                 $entries,
-                fn(array $entry): bool => $entry['level'] === $this->logLevel,
+                fn (array $entry): bool => $entry['level'] === $this->logLevel,
             ));
         }
 
@@ -461,7 +541,7 @@ class BrowserConsole extends Component
         // Truncate long messages for display
         foreach ($entries as &$entry) {
             if (strlen($entry['message']) > 500) {
-                $entry['message'] = substr($entry['message'], 0, 500) . '…';
+                $entry['message'] = substr($entry['message'], 0, 500).'…';
             }
         }
 
@@ -470,6 +550,8 @@ class BrowserConsole extends Component
 
     public function clearLog(): void
     {
+        $this->ensureAuthenticated();
+
         $logPath = storage_path('logs/laravel.log');
 
         if (File::exists($logPath)) {
@@ -479,30 +561,37 @@ class BrowserConsole extends Component
         $this->logEntries = [];
     }
 
-    /** @return \Symfony\Component\HttpFoundation\StreamedResponse */
-    public function downloadLog()
+    public function downloadLog(): Response
     {
+        $this->ensureAuthenticated();
+
         $logPath = storage_path('logs/laravel.log');
 
         if (! File::exists($logPath)) {
             return response()->noContent();
         }
 
-        return response()->download($logPath, 'laravel-' . date('Y-m-d') . '.log');
+        return response()->download($logPath, 'laravel-'.date('Y-m-d').'.log');
     }
 
     public function updatedLogLines(): void
     {
+        $this->ensureAuthenticated();
+
         $this->loadLogs();
     }
 
     public function updatedLogLevel(): void
     {
+        $this->ensureAuthenticated();
+
         $this->loadLogs();
     }
 
     public function loadDebugEntries(): void
     {
+        $this->ensureAuthenticated();
+
         $logPath = storage_path('logs/console-debug.log');
 
         if (! File::exists($logPath)) {
@@ -532,6 +621,8 @@ class BrowserConsole extends Component
 
     public function clearDebugEntries(): void
     {
+        $this->ensureAuthenticated();
+
         $logPath = storage_path('logs/console-debug.log');
 
         if (File::exists($logPath)) {
@@ -553,10 +644,58 @@ class BrowserConsole extends Component
         $input = Str::after($input, 'php artisan ');
         $input = Str::after($input, 'artisan ');
 
+        // Block `tinker` (and any tinker:* variant) — it runs arbitrary PHP via
+        // --execute=, fully bypassing the shell-mode allowlist/denylist. Artisan
+        // mode must not become an unrestricted code-execution surface.
+        $base = strtolower(Str::before(trim($input), ' '));
+        if (str_starts_with($base, 'tinker')) {
+            $this->history[] = [
+                'command' => $input,
+                'output' => "Command 'tinker' is disabled in the browser console.",
+                'status' => 'error',
+                'timestamp' => now()->format('H:i:s'),
+                'mode' => 'artisan',
+            ];
+
+            return;
+        }
+
+        // Reject shell quotes in artisan mode — artisan command names/flags in
+        // the curated reference set never legitimately need them, and they are
+        // the vector for --execute=/argument-injection style eval payloads.
+        if (str_contains($input, '"') || str_contains($input, "'")) {
+            $this->history[] = [
+                'command' => $input,
+                'output' => 'Quotes (" \') are not allowed in artisan mode for security reasons.',
+                'status' => 'error',
+                'timestamp' => now()->format('H:i:s'),
+                'mode' => 'artisan',
+            ];
+
+            return;
+        }
+
+        // Block shell operators to prevent injection — artisan mode should
+        // only run artisan commands, never arbitrary shell via ; && || etc.
+        $shellCheck = $this->rejectShellOperators($input);
+        if ($shellCheck !== true) {
+            $this->history[] = [
+                'command' => $input,
+                'output' => $shellCheck,
+                'status' => 'error',
+                'timestamp' => now()->format('H:i:s'),
+                'mode' => 'artisan',
+            ];
+
+            return;
+        }
+
         // Run as a subprocess to completely isolate from the web PHP process.
         // This prevents any stray PHP output from corrupting Livewire's JSON response.
+        $start = microtime(true);
+        $exitCode = null;
         try {
-            $command = 'php artisan ' . $input . ' --no-ansi --no-interaction';
+            $command = 'php artisan '.$input.' --no-ansi --no-interaction';
 
             $process = Process::fromShellCommandline($command, base_path());
             $process->setTimeout(120);
@@ -567,16 +706,17 @@ class BrowserConsole extends Component
             // Include stderr if present (e.g. error messages)
             $stderr = trim($process->getErrorOutput());
             if ($stderr) {
-                $output = $output ? $output . "\n" . $stderr : $stderr;
+                $output = $output ? $output."\n".$stderr : $stderr;
             }
 
             $output = $this->sanitizeOutput($output);
 
             // Truncate extremely large output (e.g. route:list)
             if (strlen($output) > 51200) {
-                $output = mb_strcut($output, 0, 51200, 'UTF-8') . "\n\n... [Output truncated at 50KB]";
+                $output = mb_strcut($output, 0, 51200, 'UTF-8')."\n\n... [Output truncated at 50KB]";
             }
 
+            $exitCode = $process->getExitCode();
             $this->history[] = [
                 'command' => $input,
                 'output' => $output ?: '(no output)',
@@ -585,6 +725,7 @@ class BrowserConsole extends Component
                 'mode' => 'artisan',
             ];
         } catch (ProcessTimedOutException) {
+            $exitCode = -2; // sentinel for timeout
             $this->history[] = [
                 'command' => $input,
                 'output' => 'Command timed out after 120 seconds.',
@@ -593,14 +734,17 @@ class BrowserConsole extends Component
                 'mode' => 'artisan',
             ];
         } catch (\Throwable $e) {
+            $exitCode = -1; // sentinel for exception
             $this->history[] = [
                 'command' => $input,
-                'output' => 'Error: ' . $this->sanitizeOutput($e->getMessage()),
+                'output' => 'Error: '.$this->sanitizeOutput($e->getMessage()),
                 'status' => 'error',
                 'timestamp' => now()->format('H:i:s'),
                 'mode' => 'artisan',
             ];
         }
+
+        $this->auditCommandExecuted('artisan', $input, $exitCode, $start);
     }
 
     private function runShellCommand(string $input): void
@@ -631,6 +775,9 @@ class BrowserConsole extends Component
             return;
         }
 
+        $start = microtime(true);
+        $exitCode = null;
+        $originalInput = $input;
         try {
             $timeout = $this->getShellTimeout($input);
 
@@ -654,7 +801,7 @@ class BrowserConsole extends Component
             $process->setEnv([
                 'GIT_TERMINAL_PROMPT' => '0',
                 'COMPOSER_NO_INTERACTION' => '1',
-                'PATH' => $currentPath ? $currentPath . ':' . $extraPaths : $extraPaths,
+                'PATH' => $currentPath ? $currentPath.':'.$extraPaths : $extraPaths,
             ]);
 
             // Stream output in real-time using Livewire's streaming
@@ -682,11 +829,12 @@ class BrowserConsole extends Component
 
             // Truncate extremely large output (>50KB)
             if (strlen($output) > 51200) {
-                $output = mb_strcut($output, 0, 51200, 'UTF-8') . "\n\n... [Output truncated at 50KB]";
+                $output = mb_strcut($output, 0, 51200, 'UTF-8')."\n\n... [Output truncated at 50KB]";
             }
 
             $output = $this->sanitizeOutput($output);
 
+            $exitCode = $process->getExitCode();
             $this->history[] = [
                 'command' => $input,
                 'output' => $output ?: '(no output)',
@@ -695,6 +843,7 @@ class BrowserConsole extends Component
                 'mode' => 'shell',
             ];
         } catch (ProcessTimedOutException) {
+            $exitCode = -2; // sentinel for timeout
             $this->history[] = [
                 'command' => $input,
                 'output' => "Command timed out after {$timeout} seconds.",
@@ -703,22 +852,37 @@ class BrowserConsole extends Component
                 'mode' => 'shell',
             ];
         } catch (\Throwable $e) {
+            $exitCode = -1; // sentinel for exception
             $this->history[] = [
                 'command' => $input,
-                'output' => 'Error: ' . $this->sanitizeOutput($e->getMessage()),
+                'output' => 'Error: '.$this->sanitizeOutput($e->getMessage()),
                 'status' => 'error',
                 'timestamp' => now()->format('H:i:s'),
                 'mode' => 'shell',
             ];
         }
+
+        $this->auditCommandExecuted('shell', $originalInput, $exitCode, $start);
+    }
+
+    private function auditCommandExecuted(string $mode, string $command, ?int $exitCode, float $startedAt): void
+    {
+        Audit::event('console.command.executed', [
+            'mode' => $mode,
+            'command' => $command,
+            'exit_code' => $exitCode,
+            'duration_ms' => (int) round((microtime(true) - $startedAt) * 1000),
+            'ip' => request()?->ip(),
+        ]);
     }
 
     /**
-     * Validate a shell command against security rules.
+     * Reject shell operators and control characters that could allow injection.
+     * Shared by both artisan and shell modes.
      *
-     * @return true|string True if valid, or error message string
+     * @return true|string True if clean, or error message string
      */
-    private function validateShellCommand(string $input): true|string
+    private function rejectShellOperators(string $input): true|string
     {
         // Block control characters (newline injection, carriage return)
         if (preg_match('/[\x00-\x1f\x7f]/', $input)) {
@@ -734,9 +898,25 @@ class BrowserConsole extends Component
             }
         }
 
-        // Block shell variable expansion and globbing
-        if (preg_match('/(?<!\\\)\$\w/', $input) || preg_match('/(?<!\\\)~/', $input)) {
+        // Block shell variable expansion and globbing unconditionally —
+        // backslash-escaped variants like \$HOME can still expand in some shells.
+        if (preg_match('/\$\w/', $input) || str_contains($input, '~')) {
             return 'Shell variable expansion ($VAR, ~) is not allowed for security reasons.';
+        }
+
+        return true;
+    }
+
+    /**
+     * Validate a shell command against security rules.
+     *
+     * @return true|string True if valid, or error message string
+     */
+    private function validateShellCommand(string $input): true|string
+    {
+        $operatorCheck = $this->rejectShellOperators($input);
+        if ($operatorCheck !== true) {
+            return $operatorCheck;
         }
 
         // Extract the base command (first word)
@@ -766,7 +946,7 @@ class BrowserConsole extends Component
         ];
 
         if (! in_array($baseCommand, $allowedCommands, true)) {
-            return "Command '{$baseCommand}' is not in the allowed commands list.\nAllowed: " . implode(', ', $allowedCommands);
+            return "Command '{$baseCommand}' is not in the allowed commands list.\nAllowed: ".implode(', ', $allowedCommands);
         }
 
         // Block dangerous subcommand patterns
@@ -836,5 +1016,51 @@ class BrowserConsole extends Component
         $output = (string) preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $output);
 
         return $output;
+    }
+
+    /**
+     * Read approximately the last N lines from a file without loading
+     * the entire file into memory. Uses fseek to read from the tail.
+     *
+     * @return list<string>
+     */
+    private function readTailLines(string $path, int $lineCount): array
+    {
+        $fileSize = filesize($path);
+
+        if ($fileSize === 0 || $fileSize === false) {
+            return [];
+        }
+
+        // For small files (< 256KB), just read the whole thing — it's cheap
+        if ($fileSize < 262144) {
+            return file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
+        }
+
+        // For large files, read a chunk from the end.
+        // Estimate ~500 bytes per line, add 20% buffer.
+        $chunkSize = min($fileSize, (int) ($lineCount * 600));
+
+        $handle = fopen($path, 'r');
+        if ($handle === false) {
+            return [];
+        }
+
+        fseek($handle, -$chunkSize, SEEK_END);
+
+        // Discard the first partial line (we likely landed mid-line)
+        fgets($handle);
+
+        $lines = [];
+        while (($line = fgets($handle)) !== false) {
+            $line = rtrim($line, "\r\n");
+            if ($line !== '') {
+                $lines[] = $line;
+            }
+        }
+
+        fclose($handle);
+
+        return $lines;
     }
 }

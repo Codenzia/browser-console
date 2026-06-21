@@ -4,12 +4,21 @@ declare(strict_types=1);
 
 namespace Codenzia\BrowserConsole\Commands;
 
+use Codenzia\BrowserConsole\BrowserConsoleServiceProvider;
 use Codenzia\BrowserConsole\Http\Middleware\ConsoleGate;
 use Illuminate\Console\Command;
+use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Cookie\Middleware\EncryptCookies;
+use Illuminate\Foundation\Http\Middleware\VerifyCsrfToken;
+use Illuminate\Http\Request;
 use Illuminate\Routing\Router;
 use Illuminate\Session\Middleware\StartSession;
-use Illuminate\Foundation\Http\Middleware\VerifyCsrfToken;
+use Illuminate\Session\SessionManager;
+use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+use Livewire\Livewire;
+use Symfony\Component\Console\Output\BufferedOutput;
 
 class DiagnoseCommand extends Command
 {
@@ -35,7 +44,7 @@ class DiagnoseCommand extends Command
 
     private function refreshDiagnostics(): int
     {
-        $source = dirname(__DIR__, 2) . '/stubs/bcd.php';
+        $source = dirname(__DIR__, 2).'/stubs/bcd.php';
         $destination = public_path('bcd.php');
 
         if (! file_exists($source)) {
@@ -97,11 +106,11 @@ class DiagnoseCommand extends Command
         // Laravel Structure & Environment
         $this->sectionHeader('Laravel Structure');
 
-        $fails += $this->check('.env', file_exists($basePath . '/.env'));
-        $this->check('.env.example', file_exists($basePath . '/.env.example'), file_exists($basePath . '/.env.example') ? 'Found' : 'MISSING');
+        $fails += $this->check('.env', file_exists($basePath.'/.env'));
+        $this->check('.env.example', file_exists($basePath.'/.env.example'), file_exists($basePath.'/.env.example') ? 'Found' : 'MISSING');
 
-        if (file_exists($basePath . '/.env')) {
-            $envContent = file_get_contents($basePath . '/.env');
+        if (file_exists($basePath.'/.env')) {
+            $envContent = file_get_contents($basePath.'/.env');
             $fails += $this->check('APP_KEY', (bool) preg_match('/^APP_KEY=base64:.+$/m', $envContent));
 
             $appEnv = 'unknown';
@@ -112,31 +121,137 @@ class DiagnoseCommand extends Command
 
             $appDebug = (bool) preg_match('/^APP_DEBUG=true$/mi', $envContent);
             $isProduction = $appEnv === 'production';
-            $fails += $this->check('APP_DEBUG', ! ($isProduction && $appDebug), $appDebug ? 'true' . ($isProduction ? ' (RISK in production)' : '') : 'false');
+            $fails += $this->check('APP_DEBUG', ! ($isProduction && $appDebug), $appDebug ? 'true'.($isProduction ? ' (RISK in production)' : '') : 'false');
 
             if (preg_match('/^APP_URL=(.+)$/m', $envContent, $m)) {
                 $appUrl = trim($m[1]);
                 $isLocalhost = str_contains($appUrl, 'localhost') || str_contains($appUrl, '127.0.0.1');
                 $fails += $this->check('APP_URL', ! ($isProduction && $isLocalhost), $appUrl);
+
+                // Verify APP_URL host resolves in DNS
+                $appUrlHost = parse_url($appUrl, PHP_URL_HOST);
+                if ($appUrlHost && ! in_array($appUrlHost, ['localhost', '127.0.0.1', '::1'], true)) {
+                    $resolved = gethostbyname($appUrlHost);
+                    $resolves = $resolved !== $appUrlHost;
+                    $fails += $this->check(
+                        'APP_URL DNS',
+                        $resolves,
+                        $resolves ? "{$appUrlHost} → {$resolved}" : "{$appUrlHost} does not resolve"
+                    );
+                }
             }
         }
 
-        $fails += $this->check('vendor/', is_dir($basePath . '/vendor'));
-        $fails += $this->check('vendor/autoload.php', file_exists($basePath . '/vendor/autoload.php'));
-        $this->check('composer.lock', file_exists($basePath . '/composer.lock'), file_exists($basePath . '/composer.lock') ? 'Found' : 'MISSING');
+        $fails += $this->check('vendor/', is_dir($basePath.'/vendor'));
+        $fails += $this->check('vendor/autoload.php', file_exists($basePath.'/vendor/autoload.php'));
+        $this->check('composer.lock', file_exists($basePath.'/composer.lock'), file_exists($basePath.'/composer.lock') ? 'Found' : 'MISSING');
 
-        $configCached = file_exists($basePath . '/bootstrap/cache/config.php');
+        $configCached = file_exists($basePath.'/bootstrap/cache/config.php');
         $this->check('Config Cache', true, $configCached ? 'Cached' : 'Not cached');
 
-        $routesCached = file_exists($basePath . '/bootstrap/cache/routes-v7.php');
+        $routesCached = file_exists($basePath.'/bootstrap/cache/routes-v7.php');
         $this->check('Routes Cache', true, $routesCached ? 'Cached' : 'Not cached');
+
+        // Database
+        $this->sectionHeader('Database');
+
+        $dbConnection = config('database.default');
+        $dbDriver = config("database.connections.{$dbConnection}.driver");
+        $this->check('DB_CONNECTION', true, "{$dbConnection} ({$dbDriver})");
+
+        // SQLite-specific: verify database file exists
+        if ($dbDriver === 'sqlite') {
+            $dbPath = config("database.connections.{$dbConnection}.database");
+            $relPath = $dbPath ? str_replace([$basePath.'/', $basePath.'\\'], '', $dbPath) : '';
+
+            if ($dbPath === ':memory:') {
+                $this->check('SQLite database', true, ':memory:');
+            } elseif ($dbPath && file_exists($dbPath)) {
+                $this->check('SQLite file', true, $relPath);
+                $writable = is_writable($dbPath);
+                $fails += $this->check('SQLite writable', $writable, $writable ? 'Writable' : 'NOT WRITABLE');
+            } else {
+                $fails += $this->check('SQLite file', false, 'MISSING: '.($relPath ?: 'not configured'));
+
+                if ($this->option('fix') && $dbPath) {
+                    $dir = dirname($dbPath);
+                    if (! is_dir($dir)) {
+                        @mkdir($dir, 0775, true);
+                    }
+                    @touch($dbPath);
+                    @chmod($dbPath, 0664);
+                    if (file_exists($dbPath)) {
+                        $this->fixed('Created '.basename($dbPath));
+                    }
+                }
+            }
+        }
+
+        // Generic connection + migration status (works for any database driver)
+        $dbConnected = false;
+        try {
+            DB::connection()->getPdo();
+            $this->check('Database connection', true, 'Connected');
+            $dbConnected = true;
+        } catch (\Throwable $e) {
+            $errMsg = $e->getMessage();
+            if (strlen($errMsg) > 100) {
+                $errMsg = substr($errMsg, 0, 100).'...';
+            }
+            $fails += $this->check('Database connection', false, $errMsg);
+        }
+
+        if ($dbConnected) {
+            try {
+                $output = new BufferedOutput;
+                Artisan::call('migrate:status', [], $output);
+                $statusText = trim($output->fetch());
+
+                // Count ran/pending from migrate:status output
+                $pendingCount = 0;
+                $ranCount = 0;
+                foreach (explode("\n", $statusText) as $line) {
+                    if (preg_match('/\bPending\b/i', $line)) {
+                        $pendingCount++;
+                    } elseif (preg_match('/\bRan\b/i', $line)) {
+                        $ranCount++;
+                    }
+                }
+
+                if ($ranCount === 0 && $pendingCount === 0) {
+                    $this->check('Migrations', true, 'No migrations found');
+                } elseif ($pendingCount > 0) {
+                    $fails += $this->check('Migrations', false, "{$ranCount} ran, {$pendingCount} pending");
+                } else {
+                    $this->check('Migrations', true, "{$ranCount} ran, none pending");
+                }
+
+                if ($pendingCount > 0 && $this->option('fix')) {
+                    $fixOutput = new BufferedOutput;
+                    Artisan::call('migrate', ['--force' => true], $fixOutput);
+                    $this->fixed('Ran pending migrations');
+                }
+            } catch (\Throwable $e) {
+                // migrate:status may fail if migrations table doesn't exist yet
+                $fails += $this->check('Migrations', false, $e->getMessage());
+
+                if ($this->option('fix')) {
+                    try {
+                        Artisan::call('migrate', ['--force' => true]);
+                        $this->fixed('Ran database migrations');
+                    } catch (\Throwable) {
+                        // Migration failed — skip
+                    }
+                }
+            }
+        }
 
         // Web Server & Public Directory
         $this->sectionHeader('Web Server & Public');
 
-        $fails += $this->check('public/index.php', file_exists($basePath . '/public/index.php'));
+        $fails += $this->check('public/index.php', file_exists($basePath.'/public/index.php'));
 
-        $htaccessPath = $basePath . '/public/.htaccess';
+        $htaccessPath = $basePath.'/public/.htaccess';
         if (file_exists($htaccessPath)) {
             $htContent = file_get_contents($htaccessPath);
             $hasRewrite = (bool) preg_match('/RewriteEngine\s+On/i', $htContent);
@@ -146,19 +261,19 @@ class DiagnoseCommand extends Command
             $fails += $this->check('.htaccess', false, 'MISSING');
         }
 
-        $hotExists = file_exists($basePath . '/public/hot');
+        $hotExists = file_exists($basePath.'/public/hot');
         if ($hotExists && $this->option('fix')) {
-            @unlink($basePath . '/public/hot');
-            $hotExists = file_exists($basePath . '/public/hot');
+            @unlink($basePath.'/public/hot');
+            $hotExists = file_exists($basePath.'/public/hot');
             if (! $hotExists) {
                 $this->fixed('Removed public/hot');
             }
         }
         $fails += $this->check('public/hot', ! $hotExists, $hotExists ? 'EXISTS (Vite dev leftover)' : 'Not present');
 
-        if (file_exists($basePath . '/package.json')) {
-            $hasBuild = is_dir($basePath . '/public/build');
-            $hasManifest = file_exists($basePath . '/public/build/manifest.json');
+        if (file_exists($basePath.'/package.json')) {
+            $hasBuild = is_dir($basePath.'/public/build');
+            $hasManifest = file_exists($basePath.'/public/build/manifest.json');
             if ($hasBuild && $hasManifest) {
                 $this->check('public/build/', true, 'Found with manifest');
             } elseif ($hasBuild) {
@@ -168,7 +283,7 @@ class DiagnoseCommand extends Command
             }
         }
 
-        $publicStorage = $basePath . '/public/storage';
+        $publicStorage = $basePath.'/public/storage';
         $this->check('public/storage symlink', true, is_link($publicStorage) ? 'Linked' : 'Not created (optional)');
 
         // File & Directory Permissions
@@ -182,7 +297,7 @@ class DiagnoseCommand extends Command
         ];
 
         foreach ($writables as $dir) {
-            $full = $basePath . '/' . $dir;
+            $full = $basePath.'/'.$dir;
             $exists = is_dir($full);
             $writable = $exists && is_writable($full);
 
@@ -202,14 +317,14 @@ class DiagnoseCommand extends Command
             $fails += $this->check($dir, $writable, $writable ? 'Writable' : ($exists ? 'NOT WRITABLE' : 'MISSING'));
         }
 
-        $this->check('public/ (readable)', is_readable($basePath . '/public'), is_readable($basePath . '/public') ? 'Readable' : 'NOT READABLE');
+        $this->check('public/ (readable)', is_readable($basePath.'/public'), is_readable($basePath.'/public') ? 'Readable' : 'NOT READABLE');
 
         // Browser Console Package
         $this->sectionHeader('Browser Console');
 
-        $fails += $this->check('Package installed', class_exists(\Codenzia\BrowserConsole\BrowserConsoleServiceProvider::class));
+        $fails += $this->check('Package installed', class_exists(BrowserConsoleServiceProvider::class));
 
-        $configPublished = file_exists($basePath . '/config/browser-console.php');
+        $configPublished = file_exists($basePath.'/config/browser-console.php');
         $fails += $this->check('Config published', $configPublished);
 
         $hasUser = ! empty(config('browser-console.user'));
@@ -218,14 +333,14 @@ class DiagnoseCommand extends Command
         $hasPass = ! empty(config('browser-console.password'));
         $fails += $this->check('BROWSER_CONSOLE_PASSWORD', $hasPass, $hasPass ? 'Set' : 'NOT SET');
 
-        $lwInstalled = class_exists(\Livewire\Livewire::class);
+        $lwInstalled = class_exists(Livewire::class);
         $fails += $this->check('Livewire installed', $lwInstalled);
 
         // Route check
         $consolePath = config('browser-console.path', 'console');
         try {
             $routes = app('router')->getRoutes();
-            $testRequest = \Illuminate\Http\Request::create('/' . $consolePath, 'GET');
+            $testRequest = Request::create('/'.$consolePath, 'GET');
             $matched = $routes->match($testRequest);
             $this->check("Route /{$consolePath}", (bool) $matched, 'Registered');
         } catch (\Throwable) {
@@ -242,7 +357,7 @@ class DiagnoseCommand extends Command
             // Clear all Laravel caches
             foreach (['config:clear', 'route:clear', 'view:clear', 'event:clear'] as $cmd) {
                 try {
-                    \Illuminate\Support\Facades\Artisan::call($cmd);
+                    Artisan::call($cmd);
                     $this->fixed($cmd);
                 } catch (\Throwable) {
                     // Ignore — some commands may not exist in older Laravel
@@ -252,7 +367,7 @@ class DiagnoseCommand extends Command
             // Publish bcd.php if missing
             $diagFile = public_path('bcd.php');
             if (! file_exists($diagFile)) {
-                $source = dirname(__DIR__, 2) . '/stubs/bcd.php';
+                $source = dirname(__DIR__, 2).'/stubs/bcd.php';
                 if (file_exists($source)) {
                     copy($source, $diagFile);
                     $this->fixed('Published public/bcd.php');
@@ -321,7 +436,7 @@ class DiagnoseCommand extends Command
         $cgInRoute = false;
         try {
             $routes = app('router')->getRoutes();
-            $testRequest = \Illuminate\Http\Request::create('/' . $consolePath, 'GET');
+            $testRequest = Request::create('/'.$consolePath, 'GET');
             $matched = $routes->match($testRequest);
             if ($matched) {
                 $routeMiddleware = $matched->gatherMiddleware();
@@ -344,9 +459,9 @@ class DiagnoseCommand extends Command
 
         // Check ConsoleGate in Livewire persistent middleware
         $cgInPersistent = false;
-        if (class_exists(\Livewire\Livewire::class)) {
+        if (class_exists(Livewire::class)) {
             try {
-                $persistent = \Livewire\Livewire::getPersistentMiddleware();
+                $persistent = Livewire::getPersistentMiddleware();
                 $cgInPersistent = in_array(ConsoleGate::class, $persistent, true);
             } catch (\Throwable) {
                 // Ignore
@@ -365,7 +480,7 @@ class DiagnoseCommand extends Command
 
         if (empty($webGroup)) {
             try {
-                app(\Illuminate\Contracts\Http\Kernel::class);
+                app(Kernel::class);
                 $webGroup = $router->getMiddlewareGroups()['web'] ?? [];
             } catch (\Throwable) {
                 // Ignore
@@ -396,8 +511,8 @@ class DiagnoseCommand extends Command
         $this->sectionHeader('Session File Test');
 
         $sessionPath = storage_path('framework/sessions');
-        $testFile = $sessionPath . '/_diag_test_' . bin2hex(random_bytes(8));
-        $testData = 'csrf_diag_' . time();
+        $testFile = $sessionPath.'/_diag_test_'.bin2hex(random_bytes(8));
+        $testData = 'csrf_diag_'.time();
 
         // Write
         $written = @file_put_contents($testFile, $testData);
@@ -415,11 +530,11 @@ class DiagnoseCommand extends Command
 
         try {
             // Test the app's session driver to verify CSRF token persistence
-            $manager = new \Illuminate\Session\SessionManager(app());
+            $manager = new SessionManager(app());
             $session = $manager->driver();
             $session->start();
 
-            $token = \Illuminate\Support\Str::random(40);
+            $token = Str::random(40);
             $session->put('_token', $token);
             $session->save();
             $sessionId = $session->getId();
@@ -439,7 +554,7 @@ class DiagnoseCommand extends Command
 
             // Clean up test session file if file driver
             if (config('session.driver') === 'file') {
-                @unlink($sessionPath . '/' . $sessionId);
+                @unlink($sessionPath.'/'.$sessionId);
             }
         } catch (\Throwable $e) {
             $fails += $this->check('Session roundtrip', false, $e->getMessage());
@@ -466,13 +581,13 @@ class DiagnoseCommand extends Command
         $this->check('memory_limit', true, $memoryLimit);
 
         $maxExecTime = ini_get('max_execution_time') ?: '0';
-        $this->check('max_execution_time', true, $maxExecTime . 's');
+        $this->check('max_execution_time', true, $maxExecTime.'s');
 
         $gcMaxLifetime = (int) ini_get('session.gc_maxlifetime');
         $fails += $this->check(
             'session.gc_maxlifetime',
             $gcMaxLifetime >= 1440,
-            $gcMaxLifetime . 's (' . round($gcMaxLifetime / 60) . ' min)'
+            $gcMaxLifetime.'s ('.round($gcMaxLifetime / 60).' min)'
         );
 
         // ── HTTPS & Proxy ──
@@ -503,7 +618,7 @@ class DiagnoseCommand extends Command
         // Also check kernel-level middleware (Laravel 11+ uses bootstrap/app.php)
         if (! $trustProxiesInWeb) {
             try {
-                $kernel = app(\Illuminate\Contracts\Http\Kernel::class);
+                $kernel = app(Kernel::class);
                 if (method_exists($kernel, 'getGlobalMiddleware')) {
                     foreach ($kernel->getGlobalMiddleware() as $mw) {
                         if (is_string($mw) && (str_contains($mw, 'TrustProxies') || str_contains($mw, 'TrustedProxies'))) {
@@ -563,14 +678,14 @@ class DiagnoseCommand extends Command
             }
         }
 
-        $this->check('EncryptCookies in web group', $encryptInWeb, $encryptInWeb ? 'Position ' . $encryptPos : 'Not found');
+        $this->check('EncryptCookies in web group', $encryptInWeb, $encryptInWeb ? 'Position '.$encryptPos : 'Not found');
 
         if ($encryptInWeb && $ssWebPos !== false) {
             $orderOk = $encryptPos < $ssWebPos;
             $this->check(
                 'EncryptCookies before StartSession',
                 $orderOk,
-                $orderOk ? "Position {$encryptPos} < {$ssWebPos}" : "WRONG ORDER — session cookie decryption may fail"
+                $orderOk ? "Position {$encryptPos} < {$ssWebPos}" : 'WRONG ORDER — session cookie decryption may fail'
             );
         }
 
@@ -596,7 +711,7 @@ class DiagnoseCommand extends Command
     {
         $this->info('');
         $this->info("  {$title}");
-        $this->info('  ' . str_repeat('-', strlen($title)));
+        $this->info('  '.str_repeat('-', strlen($title)));
     }
 
     /**

@@ -253,7 +253,7 @@
 
                                 {{-- Input Area --}}
                                 <div class="border-t border-slate-700 bg-slate-900 px-4 py-3 shrink-0">
-                                    <form wire:submit="runCommand" @submit="cmdRunning = true"
+                                    <form wire:submit="runCommand" @submit="if ($wire.command.trim()) cmdRunning = true"
                                         class="flex items-center gap-3">
                                         <span
                                             class="{{ $mode === 'shell' ? 'text-emerald-400' : 'text-green-400' }} select-none font-mono text-sm">$</span>
@@ -408,8 +408,10 @@
                                             </thead>
                                             <tbody class="divide-y divide-slate-700/50">
                                                 @foreach ($logEntries as $index => $entry)
-                                                    <tr class="group hover:bg-slate-700/30 transition-colors"
-                                                        x-data="{ expanded: false, copied: false }">
+                                                    <tr class="hover:bg-slate-700/30 transition-colors"
+                                                        x-data="{ expanded: false, copied: false, hovered: false }"
+                                                        x-on:mouseenter="hovered = true"
+                                                        x-on:mouseleave="hovered = false">
                                                         <td
                                                             class="px-4 py-2 text-xs text-slate-400 font-mono whitespace-nowrap align-top">
                                                             {{ $entry['timestamp'] }}</td>
@@ -450,7 +452,8 @@
                                                                         'Click to expand'"></pre>
                                                                 <button type="button"
                                                                     @click.stop="copyText($refs.msg.textContent); copied = true; setTimeout(() => copied = false, 1500)"
-                                                                    class="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-xs border transition opacity-0 group-hover:opacity-100"
+                                                                    x-show="hovered || copied" x-cloak
+                                                                    class="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-xs border transition"
                                                                     :class="copied ?
                                                                         'text-green-400 border-green-500/30 bg-green-500/10' :
                                                                         'text-slate-500 border-slate-700 hover:text-slate-300 hover:border-slate-500'"
@@ -575,8 +578,10 @@
                                                 ];
                                                 $c = $colorMap[$entry['color'] ?? 'gray'] ?? $colorMap['gray'];
                                             @endphp
-                                            <div class="group/debug rounded-lg border border-slate-700/50 {{ $c['bg'] }} border-l-4 {{ $c['border'] }} overflow-hidden"
-                                                x-data="{ expanded: false, copied: false }">
+                                            <div class="rounded-lg border border-slate-700/50 {{ $c['bg'] }} border-l-4 {{ $c['border'] }} overflow-hidden"
+                                                x-data="{ expanded: false, copied: false, hovered: false }"
+                                                x-on:mouseenter="hovered = true"
+                                                x-on:mouseleave="hovered = false">
                                                 {{-- Entry Header --}}
                                                 <div class="flex items-center gap-2 px-3 py-2 cursor-pointer"
                                                     @click="expanded = !expanded">
@@ -643,7 +648,8 @@
 
                                                     <button type="button"
                                                         @click.stop="copyText($refs.debugDetail.textContent); copied = true; setTimeout(() => copied = false, 1500)"
-                                                        class="shrink-0 px-1.5 py-0.5 rounded text-xs border transition opacity-0 group-hover/debug:opacity-100"
+                                                        x-show="hovered || copied" x-cloak
+                                                        class="shrink-0 px-1.5 py-0.5 rounded text-xs border transition"
                                                         :class="copied ?
                                                             'text-green-400 border-green-500/30 bg-green-500/10' :
                                                             'text-slate-500 border-slate-700 hover:text-slate-300 hover:border-slate-500'"
@@ -820,7 +826,7 @@
                                                 <div class="space-y-1">
                                                     @foreach ($steps as $step)
                                                         <button type="button"
-                                                            wire:click="switchMode('{{ $step['mode'] }}'); fillCommand('{{ addslashes($step['command']) }}')"
+                                                            wire:click="fillCommand('{{ addslashes($step['command']) }}', '{{ $step['mode'] }}')"
                                                             class="cmd-ref-btn w-full text-left px-2.5 py-2 rounded-md group">
                                                             <div class="flex items-start gap-2">
                                                                 <span

@@ -4,7 +4,12 @@ declare(strict_types=1);
 
 namespace Codenzia\BrowserConsole;
 
+use Codenzia\BrowserConsole\Http\Middleware\ConsoleEnabled;
 use Codenzia\BrowserConsole\Http\Middleware\ConsoleGate;
+use Codenzia\BrowserConsole\Livewire\BrowserConsole;
+use Codenzia\BrowserConsole\Services\ConsoleSwitch;
+use Illuminate\Contracts\Cache\Repository as CacheRepository;
+use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Support\Facades\Route;
 use Livewire\Livewire;
 use Spatie\LaravelPackageTools\Commands\InstallCommand;
@@ -34,10 +39,11 @@ class BrowserConsoleServiceProvider extends PackageServiceProvider
                         $cmd->line('  deployment issues when Laravel cannot boot.');
                         $cmd->line('  It is protected by your BROWSER_CONSOLE_PASSWORD.');
                         $cmd->warn('  It exposes server info (PHP version, extensions, permissions).');
+                        $cmd->warn('  It is NOT governed by the kill switch — remove it before production.');
                         $cmd->newLine();
 
-                        if ($cmd->confirm('Publish the diagnostics page to public/bcd.php?', true)) {
-                            $source = __DIR__ . '/../stubs/bcd.php';
+                        if ($cmd->confirm('Publish the diagnostics page to public/bcd.php?', false)) {
+                            $source = __DIR__.'/../stubs/bcd.php';
                             $destination = public_path('bcd.php');
 
                             if (file_exists($source)) {
@@ -55,17 +61,38 @@ class BrowserConsoleServiceProvider extends PackageServiceProvider
     public function packageRegistered(): void
     {
         $this->loadHelpers();
+
+        $this->app->singleton('console.switch', function ($app): ConsoleSwitch {
+            return new ConsoleSwitch(
+                $app->make(CacheRepository::class),
+                $app->make(Application::class),
+            );
+        });
+
+        $this->app->alias('console.switch', ConsoleSwitch::class);
     }
 
     public function packageBooted(): void
     {
         // Register the Livewire component
-        Livewire::component('browser-console::terminal', \Codenzia\BrowserConsole\Livewire\BrowserConsole::class);
+        $components = [
+            'browser-console::terminal' => BrowserConsole::class,
+        ];
 
-        // Tell Livewire to re-apply ConsoleGate during update requests for
-        // components that originated from routes with this middleware.
-        // This replaces the old global middleware approach which interfered
-        // with the host app's sessions and Livewire components.
+        foreach ($components as $alias => $class) {
+            Livewire::component($alias, $class);
+        }
+
+        // Livewire v4's Finder only checks registered namespaces for
+        // `ns::component` lookups, never classComponents entries.
+        if (method_exists(Livewire::getFacadeRoot(), 'resolveMissingComponent')) {
+            Livewire::resolveMissingComponent(fn (string $name): ?string => $components[$name] ?? null);
+        }
+
+        // Re-apply the kill-switch and IP/active gate to every Livewire
+        // update so that disabling the console mid-session also kills any
+        // in-flight terminal AJAX traffic. ConsoleEnabled runs first.
+        Livewire::addPersistentMiddleware(ConsoleEnabled::class);
         Livewire::addPersistentMiddleware(ConsoleGate::class);
 
         // Register routes
@@ -74,15 +101,18 @@ class BrowserConsoleServiceProvider extends PackageServiceProvider
 
     protected function registerRoutes(): void
     {
-        Route::middleware([ConsoleGate::class, 'web'])
+        // ConsoleEnabled MUST come before ConsoleGate so that a sealed route
+        // 404s opaquely without exercising IP allowlist logic or the `web`
+        // middleware stack. Order is load-bearing.
+        Route::middleware([ConsoleEnabled::class, ConsoleGate::class, 'web'])
             ->group(function () {
-                $this->loadRoutesFrom(__DIR__ . '/../routes/web.php');
+                $this->loadRoutesFrom(__DIR__.'/../routes/web.php');
             });
     }
 
     protected function loadHelpers(): void
     {
-        $helperPath = __DIR__ . '/Helpers/helpers.php';
+        $helperPath = __DIR__.'/Helpers/helpers.php';
 
         if (file_exists($helperPath)) {
             require_once $helperPath;
@@ -95,6 +125,9 @@ class BrowserConsoleServiceProvider extends PackageServiceProvider
             Commands\CreateAccessCommand::class,
             Commands\ShowAccessCommand::class,
             Commands\DiagnoseCommand::class,
+            Commands\EnableCommand::class,
+            Commands\DisableCommand::class,
+            Commands\StatusCommand::class,
         ];
     }
 }

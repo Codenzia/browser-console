@@ -2,10 +2,11 @@
 
 use Codenzia\BrowserConsole\Http\Middleware\ConsoleGate;
 use Illuminate\Http\Request;
+use Symfony\Component\HttpKernel\Exception\HttpException;
 
 it('sets browser-console.active config flag', function () {
     $request = Request::create('/console');
-    $middleware = new ConsoleGate();
+    $middleware = new ConsoleGate;
 
     $middleware->handle($request, function () {
         expect(config('browser-console.active'))->toBeTrue();
@@ -16,7 +17,7 @@ it('sets browser-console.active config flag', function () {
 
 it('suppresses display_errors', function () {
     $request = Request::create('/console');
-    $middleware = new ConsoleGate();
+    $middleware = new ConsoleGate;
 
     $middleware->handle($request, function () {
         expect(ini_get('display_errors'))->toBe('0');
@@ -31,7 +32,7 @@ it('allows all IPs when allowed_ips is not configured', function () {
     $request = Request::create('/console');
     $request->server->set('REMOTE_ADDR', '192.168.1.50');
 
-    $middleware = new ConsoleGate();
+    $middleware = new ConsoleGate;
 
     $response = $middleware->handle($request, function () {
         return response('ok');
@@ -46,7 +47,7 @@ it('allows requests from whitelisted IPs', function () {
     $request = Request::create('/console');
     $request->server->set('REMOTE_ADDR', '127.0.0.1');
 
-    $middleware = new ConsoleGate();
+    $middleware = new ConsoleGate;
 
     $response = $middleware->handle($request, function () {
         return response('ok');
@@ -61,12 +62,12 @@ it('blocks requests from non-whitelisted IPs', function () {
     $request = Request::create('/console');
     $request->server->set('REMOTE_ADDR', '192.168.1.50');
 
-    $middleware = new ConsoleGate();
+    $middleware = new ConsoleGate;
 
     $middleware->handle($request, function () {
         return response('ok');
     });
-})->throws(\Symfony\Component\HttpKernel\Exception\HttpException::class);
+})->throws(HttpException::class);
 
 it('trims whitespace from allowed IPs', function () {
     config()->set('browser-console.allowed_ips', '  127.0.0.1  ,  10.0.0.5  ');
@@ -74,7 +75,7 @@ it('trims whitespace from allowed IPs', function () {
     $request = Request::create('/console');
     $request->server->set('REMOTE_ADDR', '10.0.0.5');
 
-    $middleware = new ConsoleGate();
+    $middleware = new ConsoleGate;
 
     $response = $middleware->handle($request, function () {
         return response('ok');
