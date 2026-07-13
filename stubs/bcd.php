@@ -167,41 +167,89 @@ function bc_throttle_locked(array $rec, int $max): bool
 }
 
 /**
- * Record a failed attempt for an IP and persist the whole store.
+ * Drop stale per-IP records so a botnet cannot grow the store unbounded — an
+ * entry outside the lockout window is already treated as zero, so it carries
+ * no state worth keeping.
+ *
+ * @param  array<string, array{count: int, at: int}>  $store
+ * @return array<string, array{count: int, at: int}>
+ */
+function bc_throttle_prune(array $store, int $now, int $window): array
+{
+    foreach ($store as $ip => $rec) {
+        if (! is_array($rec) || ($now - (int) ($rec['at'] ?? 0)) > $window) {
+            unset($store[$ip]);
+        }
+    }
+
+    return $store;
+}
+
+/**
+ * Mutate the throttle store under a single exclusive lock held across the whole
+ * read-modify-write. `file_put_contents(LOCK_EX)` only locks the write, so a
+ * plain load→increment→persist loses updates when requests race — a parallel
+ * brute-forcer could then burst past the limit. flock() on one handle closes
+ * that window: each concurrent failure genuinely increments.
+ *
+ * @param  callable(array<string, array{count: int, at: int}>): array{store: array<string, array{count: int, at: int}>, return: mixed}  $mutator
+ */
+function bc_throttle_mutate(?string $file, callable $mutator): mixed
+{
+    if (! $file) {
+        return $mutator([])['return'] ?? null;
+    }
+
+    $handle = @fopen($file, 'c+');
+    if ($handle === false) {
+        return $mutator([])['return'] ?? null;
+    }
+
+    try {
+        @flock($handle, LOCK_EX);
+
+        $raw = stream_get_contents($handle);
+        $store = json_decode((string) $raw, true);
+        $store = is_array($store) ? $store : [];
+
+        $result = $mutator($store);
+
+        @ftruncate($handle, 0);
+        @rewind($handle);
+        @fwrite($handle, json_encode($result['store'] ?? $store));
+        @fflush($handle);
+
+        return $result['return'] ?? null;
+    } finally {
+        @flock($handle, LOCK_UN);
+        @fclose($handle);
+    }
+}
+
+/**
+ * Atomically record a failed attempt for an IP and persist the pruned store.
  *
  * @return array{count: int, at: int}
  */
 function bc_throttle_hit(?string $file, string $ip, int $now, int $window, int $max): array
 {
-    $store = bc_throttle_load($file);
-    $rec = bc_throttle_record($store, $ip, $now, $window);
-    $rec['count']++;
-    $rec['at'] = $now;
-    $store[$ip] = $rec;
-    bc_throttle_persist($file, $store);
+    return bc_throttle_mutate($file, function (array $store) use ($ip, $now, $window): array {
+        $rec = bc_throttle_record($store, $ip, $now, $window);
+        $rec['count']++;
+        $rec['at'] = $now;
+        $store[$ip] = $rec;
 
-    return $rec;
+        return ['store' => bc_throttle_prune($store, $now, $window), 'return' => $rec];
+    });
 }
 
 function bc_throttle_clear(?string $file, string $ip): void
 {
-    $store = bc_throttle_load($file);
-    if (isset($store[$ip])) {
+    bc_throttle_mutate($file, function (array $store) use ($ip): array {
         unset($store[$ip]);
-        bc_throttle_persist($file, $store);
-    }
-}
 
-/**
- * @param  array<string, array{count: int, at: int}>  $store
- */
-function bc_throttle_persist(?string $file, array $store): void
-{
-    if (! $file) {
-        return;
-    }
-
-    @file_put_contents($file, json_encode($store), LOCK_EX);
+        return ['store' => $store, 'return' => null];
+    });
 }
 
 // Testability seam: when included by the unit-test harness the framework-free

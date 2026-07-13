@@ -70,3 +70,30 @@ it('clears the record on success', function () {
 
     expect($rec['count'])->toBe(0);
 });
+
+it('increments once per hit with no lost updates', function () {
+    $now = time();
+
+    // Each hit does a locked read-modify-write, so N sequential hits must land N
+    // increments — the property a plain load/persist loop loses under a race.
+    for ($i = 1; $i <= 7; $i++) {
+        $rec = bc_throttle_hit($this->file, '1.2.3.4', $now, 900, 5);
+        expect($rec['count'])->toBe($i);
+    }
+
+    $persisted = bc_throttle_record(bc_throttle_load($this->file), '1.2.3.4', $now, 900);
+    expect($persisted['count'])->toBe(7);
+});
+
+it('prunes stale IP records so the store cannot grow unbounded', function () {
+    $now = time();
+
+    // A stale attacker IP (outside the window) plus a fresh one.
+    bc_throttle_hit($this->file, '9.9.9.9', $now - 1000, 900, 5);
+    bc_throttle_hit($this->file, '1.2.3.4', $now, 900, 5);
+
+    $store = bc_throttle_load($this->file);
+
+    expect($store)->toHaveKey('1.2.3.4')
+        ->and($store)->not->toHaveKey('9.9.9.9');
+});

@@ -47,6 +47,13 @@ return [
     |               config to change. Entries are matched as an exact command name
     |               or a `prefix:*` glob.
     |
+    |               Note: the denylist matches the command NAME the caller types.
+    |               Symfony's console resolves unambiguous abbreviations (e.g.
+    |               `db:wip` -> `db:wipe`), which the name match does not expand,
+    |               so this is a guard against accidents and a single leaked
+    |               password — not a security boundary. If you need a hard wall,
+    |               use read_only mode (allowlist) instead.
+    |
     |   allowlist — The only commands permitted while read_only is on. Matched the
     |               same way (exact name or `prefix:*` glob).
     |

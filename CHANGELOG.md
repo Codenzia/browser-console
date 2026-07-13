@@ -5,6 +5,14 @@ All notable changes to `codenzia/browser-console` will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-07-13
+
+### Security
+- **`bcd.php` throttle is now concurrency-safe (CON-002 follow-up):** the failed-attempt counter is updated under a single exclusive `flock` held across the whole read-modify-write. The 0.5.0 store used `file_put_contents(LOCK_EX)`, which locks only the write — so racing login attempts could read the same pre-increment count and lose updates, letting a parallel brute-forcer burst past the lockout. Increments are now atomic (one per failure). Stale per-IP records are also pruned on write so the store cannot grow unbounded under a botnet.
+
+### Documentation
+- Clarified that the Artisan `denylist` matches the command **name** and does not expand Symfony's unambiguous command abbreviations (`db:wip` → `db:wipe`): it is a guard against accidents and a single leaked password, not a security boundary. For a hard wall, use `read_only` mode (allowlist).
+
 ## [0.5.0] - 2026-07-13
 
 ### Security
