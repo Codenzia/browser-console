@@ -57,8 +57,9 @@ class BrowserConsole extends Component
     #[Locked]
     public array $debugEntries = [];
 
-    /** Cached command reference — built once in mount(), avoids Artisan::all() on every XHR. */
+    /** Cached command reference — built once on authentication, avoids Artisan::all() on every XHR. */
     /** @var array<string, array<int, array{command: string, description: string}>> */
+    #[Locked]
     public array $commandGroups = [];
 
     public function mount(): void
@@ -66,9 +67,14 @@ class BrowserConsole extends Component
         $disabled = array_map('trim', explode(',', ini_get('disable_functions') ?: ''));
         $this->shellAvailable = ! in_array('proc_open', $disabled, true);
 
-        // Build command reference once on page load (matches working version's @js() approach).
-        // This prevents Artisan::all() from being called during every Livewire XHR update.
-        $this->commandGroups = $this->getCommandReference();
+        // Build the command reference only for authenticated callers. mount()
+        // runs before any auth check for anonymous visitors, and Livewire
+        // dehydrates public properties into the page snapshot — so building it
+        // unconditionally would leak the app's Artisan/seeder inventory to the
+        // public and trigger a full Artisan::all() boot on every hit.
+        if ($this->isAuthenticated) {
+            $this->commandGroups = $this->getCommandReference();
+        }
     }
 
     public function getIsAuthenticatedProperty(): bool
@@ -136,6 +142,11 @@ class BrowserConsole extends Component
         ConsoleAuth::login();
         $this->username = '';
         $this->password = '';
+
+        // Now authenticated — build the command reference (skipped in mount()
+        // for anonymous callers, see BROWSERCON-5).
+        $this->commandGroups = $this->getCommandReference();
+
         Audit::event('console.login.success', $this->loginAuditContext());
     }
 
@@ -195,6 +206,8 @@ class BrowserConsole extends Component
 
     public function fillCommand(string $cmd, string $mode = ''): void
     {
+        $this->ensureAuthenticated();
+
         // Switch mode only when explicitly requested and different from current
         if ($mode && $mode !== $this->mode && in_array($mode, ['artisan', 'shell'], true)) {
             $this->mode = $mode;
@@ -234,11 +247,40 @@ class BrowserConsole extends Component
     {
         $this->ensureAuthenticated();
 
+        if ($this->blockedByReadOnly('clearing history')) {
+            return;
+        }
+
         $this->history = [];
     }
 
-    /** @return array<string, array<int, array{command: string, description: string}>> */
-    public function getCommandReference(): array
+    /**
+     * When read-only mode is active, notify the browser and signal the caller
+     * to abort a mutating action. Returns true when the action must be blocked.
+     */
+    private function blockedByReadOnly(string $action): bool
+    {
+        if (! $this->isReadOnlyMode()) {
+            return false;
+        }
+
+        $this->dispatch('console-notice', message: 'Read-only mode is enabled — '.$action.' is disabled.');
+
+        return true;
+    }
+
+    /**
+     * Reference builders below are `protected`, not `public`. In Livewire any
+     * public method is a client-callable action; the `/console` route has no
+     * `auth` middleware (authentication is cookie-based inside the component),
+     * so a public builder could be invoked by an unauthenticated visitor to
+     * disclose the Artisan/seeder inventory and force repeated Artisan::all()
+     * boots. The Blade calls them via $this-> inside the authenticated branch,
+     * where protected access still works.
+     *
+     * @return array<string, array<int, array{command: string, description: string}>>
+     */
+    protected function getCommandReference(): array
     {
         // Buffer stray PHP output — Artisan::all() autoloads commands which
         // can trigger deprecation notices that corrupt Livewire's JSON response.
@@ -252,10 +294,36 @@ class BrowserConsole extends Component
                 $groups['Seeders'] = $seeders;
             }
 
-            return $groups;
+            return $this->isReadOnlyMode() ? $this->filterReferenceForReadOnly($groups) : $groups;
         } finally {
             ob_end_clean();
         }
+    }
+
+    /**
+     * In read-only mode, drop reference entries the backend would refuse so the
+     * UI never offers a one-click command that only errors (CON-019).
+     *
+     * @param  array<string, array<int, array{command: string, description: string}>>  $groups
+     * @return array<string, array<int, array{command: string, description: string}>>
+     */
+    private function filterReferenceForReadOnly(array $groups): array
+    {
+        $filtered = [];
+
+        foreach ($groups as $label => $commands) {
+            $kept = array_values(array_filter($commands, function (array $cmd): bool {
+                $base = strtolower((string) strtok(trim($cmd['command']), ' '));
+
+                return $this->rejectDisallowedArtisanCommand($base) === true;
+            }));
+
+            if ($kept) {
+                $filtered[$label] = $kept;
+            }
+        }
+
+        return $filtered;
     }
 
     /**
@@ -391,7 +459,7 @@ class BrowserConsole extends Component
     }
 
     /** @return array<string, array<int, array{command: string, description: string}>> */
-    public function getShellCommandReference(): array
+    protected function getShellCommandReference(): array
     {
         return [
             'Composer' => [
@@ -435,7 +503,7 @@ class BrowserConsole extends Component
     }
 
     /** @return array<string, array<int, array{step: int, command: string, title: string, description: string, mode: string}>> */
-    public function getDeploymentGuide(): array
+    protected function getDeploymentGuide(): array
     {
         return [
             'Fresh Deployment' => [
@@ -457,7 +525,7 @@ class BrowserConsole extends Component
     }
 
     /** @return array<string, array<int, array{command: string, description: string}>> */
-    public function getFilteredCommandReference(): array
+    protected function getFilteredCommandReference(): array
     {
         $commands = $this->mode === 'shell'
             ? $this->getShellCommandReference()
@@ -552,6 +620,10 @@ class BrowserConsole extends Component
     {
         $this->ensureAuthenticated();
 
+        if ($this->blockedByReadOnly('clearing the log file')) {
+            return;
+        }
+
         $logPath = storage_path('logs/laravel.log');
 
         if (File::exists($logPath)) {
@@ -568,6 +640,10 @@ class BrowserConsole extends Component
         $logPath = storage_path('logs/laravel.log');
 
         if (! File::exists($logPath)) {
+            // A bare 204 gives the browser nothing to act on, so the click looks
+            // broken. Surface an explicit notice instead of a silent no-op.
+            $this->dispatch('console-notice', message: 'There is no log file to download yet.');
+
             return response()->noContent();
         }
 
@@ -623,6 +699,10 @@ class BrowserConsole extends Component
     {
         $this->ensureAuthenticated();
 
+        if ($this->blockedByReadOnly('clearing debug entries')) {
+            return;
+        }
+
         $logPath = storage_path('logs/console-debug.log');
 
         if (File::exists($logPath)) {
@@ -640,9 +720,15 @@ class BrowserConsole extends Component
 
     private function runArtisanCommand(string $input): void
     {
-        // Strip "php artisan " prefix if typed
-        $input = Str::after($input, 'php artisan ');
-        $input = Str::after($input, 'artisan ');
+        // Strip a leading "php artisan "/"artisan " prefix only. Using Str::after
+        // here would truncate any command whose arguments merely contain that
+        // substring (e.g. a --path=artisan flag value), so match at position 0.
+        $input = trim($input);
+        if (str_starts_with($input, 'php artisan ')) {
+            $input = substr($input, strlen('php artisan '));
+        } elseif (str_starts_with($input, 'artisan ')) {
+            $input = substr($input, strlen('artisan '));
+        }
 
         // Block `tinker` (and any tinker:* variant) — it runs arbitrary PHP via
         // --execute=, fully bypassing the shell-mode allowlist/denylist. Artisan
@@ -652,6 +738,23 @@ class BrowserConsole extends Component
             $this->history[] = [
                 'command' => $input,
                 'output' => "Command 'tinker' is disabled in the browser console.",
+                'status' => 'error',
+                'timestamp' => now()->format('H:i:s'),
+                'mode' => 'artisan',
+            ];
+
+            return;
+        }
+
+        // Enforce the artisan policy: the configurable denylist (a safety net
+        // against a single leaked password wiping the app) and, when enabled,
+        // the read-only allowlist. Neither touches normal deployment commands
+        // (migrate --force, db:seed --force, optimize, *:clear, storage:link).
+        $policyError = $this->rejectDisallowedArtisanCommand($base);
+        if ($policyError !== true) {
+            $this->history[] = [
+                'command' => $input,
+                'output' => $policyError,
                 'status' => 'error',
                 'timestamp' => now()->format('H:i:s'),
                 'mode' => 'artisan',
@@ -695,10 +798,30 @@ class BrowserConsole extends Component
         $start = microtime(true);
         $exitCode = null;
         try {
-            $command = 'php artisan '.$input.' --no-ansi --no-interaction';
+            // Build the process from an argument array (proc_open with argv),
+            // never a shell string. No shell is invoked, so metacharacters such
+            // as & # | glob are passed as literal args and can never chain a
+            // second command. Quotes and shell operators are already rejected
+            // above, so whitespace-splitting is a safe tokeniser here.
+            $args = preg_split('/\s+/', trim($input)) ?: [];
 
-            $process = Process::fromShellCommandline($command, base_path());
+            // Use the running PHP binary and the absolute artisan path rather
+            // than bare `php`/`artisan`: a minimal PHP-FPM PATH may not resolve
+            // `php`, or may resolve a different PHP than the FPM worker. Extend
+            // PATH the same way shell mode does so subprocesses stay discoverable.
+            $extraPaths = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+            $currentPath = getenv('PATH') ?: '';
+
+            $process = new Process(
+                array_merge([PHP_BINARY, base_path('artisan')], $args, ['--no-ansi', '--no-interaction']),
+                base_path(),
+            );
             $process->setTimeout(120);
+            $process->setEnv([
+                'GIT_TERMINAL_PROMPT' => '0',
+                'COMPOSER_NO_INTERACTION' => '1',
+                'PATH' => $currentPath ? $currentPath.':'.$extraPaths : $extraPaths,
+            ]);
             $process->run();
 
             $output = trim($process->getOutput());
@@ -749,6 +872,20 @@ class BrowserConsole extends Component
 
     private function runShellCommand(string $input): void
     {
+        // Read-only mode disables shell execution entirely (inspection only).
+        if ($this->isReadOnlyMode()) {
+            $this->history[] = [
+                'command' => $input,
+                'output' => 'Read-only mode is enabled — shell commands are disabled '
+                    .'(config: browser-console.artisan.read_only).',
+                'status' => 'error',
+                'timestamp' => now()->format('H:i:s'),
+                'mode' => 'shell',
+            ];
+
+            return;
+        }
+
         if (! $this->shellAvailable) {
             $this->history[] = [
                 'command' => $input,
@@ -791,7 +928,14 @@ class BrowserConsole extends Component
                 $input .= ' --no-interaction';
             }
 
-            $process = Process::fromShellCommandline($input, base_path());
+            // Build the process from an argument array (proc_open with argv),
+            // never a shell string. No /bin/sh -c is spawned, so shell
+            // metacharacters (&, #, |, globbing, ext:: transport, etc.) are
+            // passed as literal arguments and cannot chain a second command.
+            // Operators/quotes are already rejected by validateShellCommand().
+            $args = preg_split('/\s+/', trim($input)) ?: [];
+
+            $process = new Process($args, base_path());
             $process->setTimeout($timeout);
 
             // Extend PATH with common binary locations so subprocesses (git, node, etc.)
@@ -877,6 +1021,68 @@ class BrowserConsole extends Component
     }
 
     /**
+     * Whether the opt-in artisan read-only inspection mode is active.
+     */
+    private function isReadOnlyMode(): bool
+    {
+        return (bool) config('browser-console.artisan.read_only', false);
+    }
+
+    /**
+     * Enforce the artisan command policy against the given base command name.
+     * In read-only mode only allowlisted commands pass; otherwise the denylist
+     * blocks a short list of irreversible commands. Both lists are configurable
+     * and the block message names the exact config to change so the operator can
+     * re-enable a command with informed consent rather than hitting a hard wall.
+     *
+     * @return true|string True if allowed, or an error message string
+     */
+    private function rejectDisallowedArtisanCommand(string $command): true|string
+    {
+        if ($this->isReadOnlyMode()) {
+            $allowlist = (array) config('browser-console.artisan.allowlist', []);
+            foreach ($allowlist as $pattern) {
+                if ($this->artisanCommandMatches($command, (string) $pattern)) {
+                    return true;
+                }
+            }
+
+            return "Read-only mode is enabled — '{$command}' is not in the artisan allowlist "
+                .'(config: browser-console.artisan.allowlist). Set browser-console.artisan.read_only '
+                .'to false, or add the command to the allowlist, to run it.';
+        }
+
+        $denylist = (array) config('browser-console.artisan.denylist', []);
+        foreach ($denylist as $pattern) {
+            if ($this->artisanCommandMatches($command, (string) $pattern)) {
+                return "Command '{$command}' is blocked by the browser-console.artisan.denylist config. "
+                    .'Remove it from that list (config/browser-console.php) if you need to run it here.';
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Match an artisan command name against a policy pattern — either an exact
+     * name or a `prefix:*` glob (e.g. `*:clear`, `migrate:*`).
+     */
+    private function artisanCommandMatches(string $command, string $pattern): bool
+    {
+        if ($pattern === $command) {
+            return true;
+        }
+
+        if (! str_contains($pattern, '*')) {
+            return false;
+        }
+
+        $regex = '/^'.str_replace('\*', '.*', preg_quote($pattern, '/')).'$/';
+
+        return (bool) preg_match($regex, $command);
+    }
+
+    /**
      * Reject shell operators and control characters that could allow injection.
      * Shared by both artisan and shell modes.
      *
@@ -889,8 +1095,13 @@ class BrowserConsole extends Component
             return 'Control characters are not allowed in commands.';
         }
 
-        // Block shell operators to prevent chaining/injection
-        $dangerousOperators = [';', '&&', '||', '|', '>', '>>', '<', '`', '$(', '${'];
+        // Block shell operators to prevent chaining/injection. The lone '&'
+        // (run-in-background) and '#' (comment) are included alongside the
+        // compound operators — a bare '&' is not caught by the '&&' check and
+        // would otherwise chain a second command. '(' ')' '!' block subshells
+        // and history expansion. Defense-in-depth: execution now uses an argv
+        // array (no shell), but these keep the denylist honest.
+        $dangerousOperators = [';', '&&', '||', '&', '|', '>', '>>', '<', '`', '$(', '${', '#', '(', ')', '!'];
 
         foreach ($dangerousOperators as $op) {
             if (str_contains($input, $op)) {
@@ -963,6 +1174,11 @@ class BrowserConsole extends Component
             '/chmod\s+777/i',                  // Overly permissive
             '/php\s+-r/i',                     // PHP inline execution
             '/php\s+\S+\.php/i',              // PHP file execution
+            '/\bartisan\s+tinker/i',          // `php artisan tinker` runs arbitrary PHP via --execute
+            '/-exec\b/i',                      // find -exec <cmd> +/\; runs arbitrary binaries
+            '/\bext::/i',                      // git ext:: transport → command execution
+            '/--upload-pack/i',                // git remote-helper command injection
+            '/--receive-pack/i',               // git remote-helper command injection
             '/composer\s+global/i',            // Global composer operations
             '/composer\s+create-project/i',    // Creating projects
             '/composer\s+exec/i',             // Composer exec

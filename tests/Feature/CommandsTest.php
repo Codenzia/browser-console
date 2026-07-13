@@ -101,6 +101,18 @@ describe('browser-console:enable', function () {
                 && $e->context['actor'] === 'ops@example.com';
         });
     });
+
+    it('clears the bcd fix-action lock marker (CON-004)', function () {
+        $marker = storage_path('logs/.bcd-locked');
+        @mkdir(dirname($marker), 0775, true);
+        file_put_contents($marker, 'locked');
+
+        config()->set('browser-console.killswitch.default_state', 'off');
+
+        $this->artisan('browser-console:enable --ttl=10')->assertSuccessful();
+
+        expect(file_exists($marker))->toBeFalse();
+    });
 });
 
 describe('browser-console:disable', function () {
@@ -147,6 +159,19 @@ describe('browser-console:disable', function () {
                 && $e->context['actor'] === 'ops@example.com';
         });
     });
+
+    it('writes the bcd fix-action lock marker (CON-004)', function () {
+        $marker = storage_path('logs/.bcd-locked');
+        if (file_exists($marker)) {
+            unlink($marker);
+        }
+
+        $this->artisan('browser-console:disable')->assertSuccessful();
+
+        expect(file_exists($marker))->toBeTrue();
+
+        @unlink($marker);
+    });
 });
 
 describe('browser-console:status', function () {
@@ -157,8 +182,8 @@ describe('browser-console:status', function () {
     it('reports disabled when default_state=off and no enable', function () {
         config()->set('browser-console.killswitch.default_state', 'off');
 
-        $exitCode = \Illuminate\Support\Facades\Artisan::call('browser-console:status');
-        $output = (string) \Illuminate\Support\Facades\Artisan::output();
+        $exitCode = Illuminate\Support\Facades\Artisan::call('browser-console:status');
+        $output = (string) Illuminate\Support\Facades\Artisan::output();
 
         expect($exitCode)->toBe(0);
         expect($output)
@@ -196,8 +221,8 @@ describe('browser-console:status', function () {
         // The full transcript is in the test harness's output buffer. Re-run
         // and capture by routing through the Console renderer.
         ob_start();
-        \Illuminate\Support\Facades\Artisan::call('browser-console:status');
-        $output = (string) \Illuminate\Support\Facades\Artisan::output();
+        Illuminate\Support\Facades\Artisan::call('browser-console:status');
+        $output = (string) Illuminate\Support\Facades\Artisan::output();
         ob_end_clean();
 
         expect($output)->not->toContain($hash);

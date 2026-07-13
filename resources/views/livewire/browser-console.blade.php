@@ -23,7 +23,8 @@
         }
     }
 }"
-    @fullscreenchange.window="isFullscreen = !!document.fullscreenElement">
+    @fullscreenchange.window="isFullscreen = !!document.fullscreenElement"
+    @console-notice.window="window.alert($event.detail.message)">
     @if (!$this->isAuthenticated)
         {{-- Login Card --}}
         <div class="flex flex-col items-center w-full max-w-md">

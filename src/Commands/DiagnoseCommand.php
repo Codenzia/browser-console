@@ -74,6 +74,14 @@ class DiagnoseCommand extends Command
         }
 
         unlink($file);
+
+        // Also clear the bcd fix-action lock marker — with the file gone there is
+        // nothing left for it to gate, and a later re-publish should start clean.
+        $marker = storage_path('logs/.bcd-locked');
+        if (is_file($marker)) {
+            @unlink($marker);
+        }
+
         $this->info('  Diagnostics page removed from public/.');
 
         return self::SUCCESS;

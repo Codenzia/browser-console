@@ -99,6 +99,23 @@ describe('default_state=local', function () {
     });
 });
 
+describe('secure-by-default production guard (BROWSERCON-2)', function () {
+    it('returns 404 in production with the shipped default (unset default_state)', function () {
+        // No default_state override — uses the package default, which now ships
+        // as 'local' (secure). In production that seals the route.
+        app()['env'] = 'production';
+
+        $this->get('/console')->assertNotFound();
+    });
+
+    it('is inert in production even with default_state=on and no explicit enable', function () {
+        config()->set('browser-console.killswitch.default_state', 'on');
+        app()['env'] = 'production';
+
+        $this->get('/console')->assertNotFound();
+    });
+});
+
 describe('password fail-closed at the route layer', function () {
     it('returns 404 when password is empty even with default_state=on', function () {
         config()->set('browser-console.killswitch.default_state', 'on');

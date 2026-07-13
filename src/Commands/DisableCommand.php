@@ -21,6 +21,12 @@ class DisableCommand extends Command
 
         $switch->disable($actor);
 
+        // Neuter public/bcd.php's privileged fix actions too. bcd.php is not
+        // governed by the cache-backed kill switch, so we drop a marker file it
+        // reads on every request to force its write/fix actions off until
+        // browser-console:enable clears it.
+        $this->lockBcdFixActions();
+
         $this->newLine();
 
         if ($mode === 'on') {
@@ -47,6 +53,24 @@ class DisableCommand extends Command
         $this->newLine();
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Write the kill-switch marker that forces public/bcd.php's fix actions off.
+     */
+    private function lockBcdFixActions(): void
+    {
+        $dir = storage_path('logs');
+
+        if (! is_dir($dir)) {
+            @mkdir($dir, 0775, true);
+        }
+
+        @file_put_contents(
+            $dir.'/.bcd-locked',
+            'Locked by browser-console:disable at '.now()->toIso8601String()."\n",
+            LOCK_EX,
+        );
     }
 
     private function resolveActor(): ?string

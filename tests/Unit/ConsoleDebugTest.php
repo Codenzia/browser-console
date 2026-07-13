@@ -18,6 +18,24 @@ afterEach(function () {
     }
 });
 
+it('writes nothing when the debug helper is disabled (CON-005)', function () {
+    config()->set('browser-console.debug.enabled', false);
+
+    $debug = new ConsoleDebug('should not be written');
+    unset($debug);
+
+    expect(File::exists($this->logPath))->toBeFalse();
+});
+
+it('still writes when the debug helper is enabled (CON-005)', function () {
+    config()->set('browser-console.debug.enabled', true);
+
+    $debug = new ConsoleDebug('should be written');
+    unset($debug);
+
+    expect(File::exists($this->logPath))->toBeTrue();
+});
+
 it('writes a debug entry to log file', function () {
     $debug = new ConsoleDebug('hello world');
     unset($debug); // Triggers __destruct → flush

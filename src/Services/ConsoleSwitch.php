@@ -179,6 +179,17 @@ class ConsoleSwitch
         }
 
         $entry = $this->cache->get($this->cacheKey());
+
+        // Hard production guard (BROWSERCON-2): regardless of the configured
+        // mode, the console is inert in production unless an explicit,
+        // time-boxed enable() unlock is currently live. This makes the package
+        // secure-by-default even if an operator ships default_state=on.
+        if ($this->app->environment('production')) {
+            return is_array($entry)
+                && ($entry['kind'] ?? null) === self::STATE_ENABLED_UNTIL
+                && $this->isEnabledUntilLive($entry);
+        }
+
         $mode = $this->defaultState();
 
         if (! is_array($entry) || ! isset($entry['kind'])) {

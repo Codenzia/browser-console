@@ -2,8 +2,8 @@
 
 [![Latest Version](https://img.shields.io/packagist/v/codenzia/browser-console.svg?style=flat-square)](https://packagist.org/packages/codenzia/browser-console)
 [![PHP Version](https://img.shields.io/packagist/php-v/codenzia/browser-console.svg?style=flat-square)](https://packagist.org/packages/codenzia/browser-console)
-[![Laravel](https://img.shields.io/badge/Laravel-11%20%7C%2012%20%7C%2013-ef4444?style=flat-square)](https://laravel.com)
-[![Tests](https://img.shields.io/badge/tests-Pest%20v3-8b5cf6?style=flat-square)](https://pestphp.com)
+[![Laravel](https://img.shields.io/badge/Laravel-12%20%7C%2013-ef4444?style=flat-square)](https://laravel.com)
+[![Tests](https://img.shields.io/badge/tests-Pest%20v4-8b5cf6?style=flat-square)](https://pestphp.com)
 [![License](https://img.shields.io/packagist/l/codenzia/browser-console.svg?style=flat-square)](LICENSE.md)
 [![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-pink?style=flat-square)](https://github.com/sponsors/codenzia)
 
@@ -33,7 +33,7 @@ A **web-based Artisan console, shell terminal, log viewer, and debug tool for La
 | Dependency | Version |
 |---|---|
 | PHP | `^8.3` |
-| Laravel | `^11.0 \|\| ^12.0 \|\| ^13.0` |
+| Laravel | `^12.0 \|\| ^13.0` |
 | Livewire | `^3.0 \|\| ^4.0` |
 
 ## Installation
@@ -69,6 +69,13 @@ return [
     // URL path (default: /console)
     'path' => env('BROWSER_CONSOLE_PATH', 'console'),
 
+    // Artisan mode policy (see "Artisan Mode Policy" below)
+    'artisan' => [
+        'read_only' => (bool) env('BROWSER_CONSOLE_READ_ONLY', false),
+        'denylist' => ['db:wipe', 'migrate:fresh', 'migrate:reset', 'migrate:rollback', 'key:generate', 'down'],
+        'allowlist' => ['*:status', 'route:list', 'about', '*:clear', 'optimize', 'optimize:clear'],
+    ],
+
     // Rate limiting (requests per minute, 0 to disable)
     'throttle' => (int) env('BROWSER_CONSOLE_THROTTLE', 60),
 
@@ -86,7 +93,7 @@ return [
 
     // Kill switch — runtime on/off control for the /console route
     'killswitch' => [
-        'default_state' => env('BROWSER_CONSOLE_DEFAULT_STATE', 'on'), // 'on' | 'off' | 'local'
+        'default_state' => env('BROWSER_CONSOLE_DEFAULT_STATE', 'local'), // 'on' | 'off' | 'local'
         'default_ttl' => (int) env('BROWSER_CONSOLE_DEFAULT_TTL', 10), // minutes used when --ttl is omitted
         'max_ttl' => (int) env('BROWSER_CONSOLE_MAX_TTL', 60),         // hard cap on --ttl in off/local mode
         'cache_key' => 'browser-console:state',
@@ -96,6 +103,11 @@ return [
     'audit' => [
         'enabled' => (bool) env('BROWSER_CONSOLE_AUDIT', true),
         'channel' => env('BROWSER_CONSOLE_AUDIT_CHANNEL', 'stack'),
+    ],
+
+    // console() debug helper — enabled everywhere by default; opt out per env
+    'debug' => [
+        'enabled' => (bool) env('BROWSER_CONSOLE_DEBUG', true),
     ],
 ];
 ```
@@ -113,8 +125,18 @@ BROWSER_CONSOLE_PATH=console
 BROWSER_CONSOLE_THROTTLE=60
 BROWSER_CONSOLE_ALLOWED_IPS=127.0.0.1,10.0.0.5
 
-# Kill switch — defaults preserve existing behavior; flip to 'off' to harden.
-BROWSER_CONSOLE_DEFAULT_STATE=on    # on | off | local
+# Artisan read-only inspection mode (opt-in; full mode stays fully capable)
+BROWSER_CONSOLE_READ_ONLY=false
+
+# console() debug helper — enabled everywhere by default; set false to no-op it
+BROWSER_CONSOLE_DEBUG=true
+
+# public/bcd.php privileged fix actions — off unless explicitly opted in
+BCD_FIX_ENABLED=false
+
+# Kill switch — ships secure-by-default as 'local' (sealed outside local env,
+# and always inert in production unless explicitly unlocked via :enable).
+BROWSER_CONSOLE_DEFAULT_STATE=local    # on | off | local
 BROWSER_CONSOLE_DEFAULT_TTL=10
 BROWSER_CONSOLE_MAX_TTL=60
 
@@ -141,6 +163,24 @@ Commands run as isolated subprocesses — no risk of corrupting the web response
 `tinker` is disabled in Artisan mode (it would allow arbitrary PHP/OS execution,
 bypassing the shell allowlist), and shell operators and quotes are rejected.
 
+#### Artisan Mode Policy
+
+Full mode (the default) stays fully capable — every deployment command
+(`migrate --force`, `db:seed --force`, `optimize`, `*:clear`, `storage:link`,
+`shield:*`, …) runs unchanged. Two safety nets sit on top:
+
+- **Denylist** — a small set of irreversible commands (`db:wipe`,
+  `migrate:fresh`, `migrate:reset`, `migrate:rollback`, `key:generate`, `down`)
+  is blocked by default so a single leaked password cannot wipe the app. This is
+  a configurable array, **not** a hard wall: edit or empty
+  `browser-console.artisan.denylist` in `config/browser-console.php` to allow any
+  of them. When a command is blocked the error message names the exact config to
+  change.
+- **Read-only mode** — set `BROWSER_CONSOLE_READ_ONLY=true` to restrict the
+  Artisan tab to the `allowlist` (status/list/clear/optimize/about) and disable
+  shell mode and all clear/write actions. Off by default; a pure inspection mode
+  for touch-nothing debugging of a live deployment.
+
 ### Shell Tab
 
 Execute whitelisted shell commands:
@@ -157,6 +197,12 @@ ls -la
 
 Shell operators (`;`, `&&`, `|`, `>`, etc.) are blocked for security.
 
+> **Platform note (Linux-only):** Shell mode targets POSIX servers. The command
+> allowlist and reference (`ls`, `pwd`, `df`, `readlink`, `ln`, `which`, …) and
+> the extended `PATH` are Unix-specific, so shell mode does not work on native
+> Windows dev boxes (e.g. Herd). This is fine for Linux production/staging — the
+> intended deployment target — but use the Artisan tab for local Windows work.
+
 > **Note:** Long-running shell commands (e.g. `composer install`, `git pull`)
 > hold a PHP-FPM worker for the duration of the command — up to 5 minutes for
 > composer. Running several long commands concurrently can exhaust the worker
@@ -168,6 +214,13 @@ Shell operators (`;`, `&&`, `|`, `>`, etc.) are blocked for security.
 - Browse Laravel log entries with level filtering (debug, info, warning, error, critical)
 - Configurable line count (50, 100, 200, 500)
 - Download or clear log files
+
+> **Secret exposure:** `laravel.log` routinely contains secrets in stack traces
+> and request payloads (DSNs, tokens, bearer headers, credentials). The Logs tab
+> shows and downloads the file **verbatim, with no redaction** — under the
+> single-password model, one credential exposes every secret ever logged. Treat
+> console access accordingly, and prefer `off`/`local` kill-switch modes plus IP
+> allowlisting on any environment whose logs may contain live secrets.
 
 ### Debug Tab
 
@@ -193,6 +246,14 @@ console($request->all(), $response)->label('API Call')->blue();
 
 Debug entries are written to `storage/logs/console-debug.log` as NDJSON and auto-pruned at 500KB.
 
+> **Production note:** Because debugging live deployments is a core purpose of
+> this tool, `console()` is **enabled everywhere by default** — including
+> production. That means any `console($request->all())` left in your code writes
+> its payload (which may contain PII/secrets) to disk on every request. If you
+> would rather it not, set `BROWSER_CONSOLE_DEBUG=false` in that environment and
+> the helper becomes a safe no-op (the fluent chain still works, it just writes
+> nothing).
+
 ## Security
 
 ### Authentication
@@ -208,16 +269,25 @@ Debug entries are written to `storage/logs/console-debug.log` as NDJSON and auto
 
 ### Production hardening (strongly recommended)
 
-The console ships with `BROWSER_CONSOLE_DEFAULT_STATE=on`, which makes the
-`/console` route reachable as soon as a password is configured — including in
-production. For production deployments you should:
+The console ships secure-by-default with `BROWSER_CONSOLE_DEFAULT_STATE=local`:
+the `/console` route is reachable only in your `local` environment and is
+**always inert in `APP_ENV=production`** unless you explicitly unlock it with
+`php artisan browser-console:enable --ttl=N` (a time-boxed window). For
+production deployments you should also:
 
-- Set `BROWSER_CONSOLE_DEFAULT_STATE=local` (or `off`) so the route is sealed by
-  default and only unlocked on demand via `php artisan browser-console:enable --ttl=N`.
+- Keep `BROWSER_CONSOLE_DEFAULT_STATE=local` (or `off`) and unlock on demand via
+  `php artisan browser-console:enable --ttl=N`.
 - Populate `BROWSER_CONSOLE_ALLOWED_IPS` with your operator IP(s).
 - Remove `public/bcd.php` before going live — it is a standalone privileged
-  diagnostics page that is **NOT** governed by the kill switch and survives
-  `browser-console:disable`. Remove it with `php artisan browser-console:diagnose --remove`.
+  diagnostics page. Remove it with `php artisan browser-console:diagnose --remove`.
+  While present, its **read-only** diagnostics always work, but its privileged
+  **write/fix actions** (create `.env`, `migrate --force`, chmod/symlink,
+  `.htaccess` overwrite) stay off unless you explicitly set `BCD_FIX_ENABLED=true`
+  in `.env` (and `APP_ENV` is not `production`). They are additionally force-off
+  while `browser-console:disable` is in effect — that command now writes a
+  `storage/logs/.bcd-locked` marker that bcd.php honors, so the kill switch also
+  neuters this file; `browser-console:enable` (or `--remove`) clears it. The
+  network-reachable read-only DB output redacts the DB host/name.
 
 ### IP Whitelisting
 
@@ -262,9 +332,11 @@ Three modes via `BROWSER_CONSOLE_DEFAULT_STATE`:
 
 | Mode | Route behavior |
 |---|---|
-| `on` _(shipped default — backwards-compatible)_ | Reachable as long as the password is configured. `:disable` writes a sticky lockout that persists until `:enable`. |
+| `on` _(legacy — reachable whenever a password is set)_ | Reachable as long as the password is configured. `:disable` writes a sticky lockout that persists until `:enable`. Still inert in production unless explicitly unlocked. |
 | `off` _(strict / recommended for hardened deployments)_ | 404 by default. Operator runs `php artisan browser-console:enable --ttl=10` to unlock for N minutes. **Auto-locks** when the timer elapses. |
-| `local` | Behaves like `on` when `app()->environment('local')`, else `off`. |
+| `local` _(shipped default — secure)_ | Behaves like `on` when `app()->environment('local')`, else `off`. |
+
+Regardless of mode, the route is **always sealed in `APP_ENV=production`** unless a live `:enable` unlock is in effect — a hard, config-independent production guard.
 
 Inspect and control the switch:
 
@@ -357,11 +429,11 @@ php artisan browser-console:disable --actor=ops@example.com          # lock imme
 
 ## Upgrade Notes
 
-This release adds a runtime kill switch and a structured audit log. **No existing behavior changes by default:** `BROWSER_CONSOLE_DEFAULT_STATE` ships as `on`, identical to prior versions where the route was reachable whenever a password was configured.
+This release makes the console **secure-by-default**. `BROWSER_CONSOLE_DEFAULT_STATE` now ships as `local` (was `on`), so `/console` is sealed outside your local environment and is **always inert in production** unless explicitly unlocked with `php artisan browser-console:enable --ttl=N`. **Breaking change:** installs that relied on the old always-on production behavior must either set `BROWSER_CONSOLE_DEFAULT_STATE=on` **and** run `:enable` in production, or (recommended) unlock on demand.
 
 To harden a deployment:
 
-1. Set `BROWSER_CONSOLE_DEFAULT_STATE=off` in `.env`.
+1. Keep `BROWSER_CONSOLE_DEFAULT_STATE=local` (or set `off`) in `.env`.
 2. Re-publish the config or add the `killswitch` / `audit` blocks manually (`php artisan vendor:publish --tag=browser-console-config --force`).
 3. Run `php artisan browser-console:enable --ttl=10` whenever you need access; the route auto-locks back to 404 after the TTL elapses.
 

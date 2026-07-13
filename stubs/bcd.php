@@ -67,6 +67,150 @@ function bc_parse_env_value(string $raw): string
     return $raw;
 }
 
+/**
+ * Append a line to the browser-console bcd audit log (best-effort, no framework).
+ * Every authenticated fix action is recorded so this privileged page is not
+ * invisible to operators / SIEM tail.
+ */
+function bc_audit_log(?string $basePath, string $action, bool $success, string $detail = ''): void
+{
+    if (! $basePath) {
+        return;
+    }
+
+    $dir = $basePath.'/storage/logs';
+    if (! is_dir($dir)) {
+        return;
+    }
+
+    $line = sprintf(
+        "[%s] bcd.php fix action=%s success=%s ip=%s ua=%s detail=%s\n",
+        date('Y-m-d H:i:s'),
+        $action,
+        $success ? 'yes' : 'no',
+        $_SERVER['REMOTE_ADDR'] ?? 'unknown',
+        substr($_SERVER['HTTP_USER_AGENT'] ?? '', 0, 160),
+        substr(str_replace(["\n", "\r"], ' ', $detail), 0, 300),
+    );
+
+    @file_put_contents($dir.'/browser-console-bcd.log', $line, FILE_APPEND | LOCK_EX);
+}
+
+/*
+|--------------------------------------------------------------------------
+| Brute-force throttle (IP-keyed file store)
+|--------------------------------------------------------------------------
+|
+| The login lockout counter is persisted to storage/logs/.bcd-throttle.json,
+| keyed by client IP. This is authoritative over the PHP session: a session-
+| scoped counter can be reset on every request simply by dropping the session
+| cookie, which would allow unlimited online password guessing. All file ops
+| are best-effort (@ + LOCK_EX), mirroring bc_audit_log.
+*/
+
+function bc_throttle_path(?string $basePath): ?string
+{
+    if (! $basePath) {
+        return null;
+    }
+
+    $dir = $basePath.'/storage/logs';
+
+    return is_dir($dir) ? $dir.'/.bcd-throttle.json' : null;
+}
+
+/**
+ * @return array<string, array{count: int, at: int}>
+ */
+function bc_throttle_load(?string $file): array
+{
+    if (! $file || ! is_file($file)) {
+        return [];
+    }
+
+    $data = json_decode((string) @file_get_contents($file), true);
+
+    return is_array($data) ? $data : [];
+}
+
+/**
+ * Resolve the current failed-attempt record for an IP, resetting to zero once
+ * the lockout window has elapsed.
+ *
+ * @param  array<string, array{count: int, at: int}>  $store
+ * @return array{count: int, at: int}
+ */
+function bc_throttle_record(array $store, string $ip, int $now, int $window): array
+{
+    $rec = $store[$ip] ?? null;
+
+    if (! is_array($rec)) {
+        return ['count' => 0, 'at' => $now];
+    }
+
+    $count = (int) ($rec['count'] ?? 0);
+    $at = (int) ($rec['at'] ?? $now);
+
+    if (($now - $at) > $window) {
+        return ['count' => 0, 'at' => $now];
+    }
+
+    return ['count' => $count, 'at' => $at];
+}
+
+/**
+ * @param  array{count: int, at: int}  $rec
+ */
+function bc_throttle_locked(array $rec, int $max): bool
+{
+    return ($rec['count'] ?? 0) >= $max;
+}
+
+/**
+ * Record a failed attempt for an IP and persist the whole store.
+ *
+ * @return array{count: int, at: int}
+ */
+function bc_throttle_hit(?string $file, string $ip, int $now, int $window, int $max): array
+{
+    $store = bc_throttle_load($file);
+    $rec = bc_throttle_record($store, $ip, $now, $window);
+    $rec['count']++;
+    $rec['at'] = $now;
+    $store[$ip] = $rec;
+    bc_throttle_persist($file, $store);
+
+    return $rec;
+}
+
+function bc_throttle_clear(?string $file, string $ip): void
+{
+    $store = bc_throttle_load($file);
+    if (isset($store[$ip])) {
+        unset($store[$ip]);
+        bc_throttle_persist($file, $store);
+    }
+}
+
+/**
+ * @param  array<string, array{count: int, at: int}>  $store
+ */
+function bc_throttle_persist(?string $file, array $store): void
+{
+    if (! $file) {
+        return;
+    }
+
+    @file_put_contents($file, json_encode($store), LOCK_EX);
+}
+
+// Testability seam: when included by the unit-test harness the framework-free
+// helpers above are now declared, and the page's stateful gate (sessions,
+// headers, HTML output) is skipped so the functions can be tested in isolation.
+if (defined('BCD_TEST_HARNESS')) {
+    return;
+}
+
 if ($basePath && file_exists($basePath.'/.env')) {
     $envContent = file_get_contents($basePath.'/.env');
 
@@ -99,33 +243,32 @@ if ($envUser && $envPasswordHash) {
     // Brute-force lockout: 5 failed attempts within a 15-minute window block
     // further attempts until the window elapses. Time-windowed so a legitimate
     // operator is never locked out permanently; cleared on successful login.
+    // The counter is persisted to an IP-keyed file store (authoritative over the
+    // PHP session) so it cannot be reset by dropping the session cookie.
     $lockoutWindow = 900; // 15 minutes
     $lockoutMax = 5;
     $now = time();
+    $throttleFile = bc_throttle_path($basePath);
+    $throttleIp = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
 
-    if (! isset($_SESSION['bcd_fail_count']) || ($now - ($_SESSION['bcd_fail_at'] ?? 0)) > $lockoutWindow) {
-        $_SESSION['bcd_fail_count'] = 0;
-        $_SESSION['bcd_fail_at'] = $now;
-    }
-
-    $lockedOut = ($_SESSION['bcd_fail_count'] ?? 0) >= $lockoutMax;
+    $throttleRec = bc_throttle_record(bc_throttle_load($throttleFile), $throttleIp, $now, $lockoutWindow);
+    $lockedOut = bc_throttle_locked($throttleRec, $lockoutMax);
 
     // Handle login attempt (with CSRF verification)
     if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['username'], $_POST['password']) && ! isset($_POST['fix'])) {
         $csrfValid = isset($_POST['_token'], $_SESSION['bcd_csrf']) && hash_equals($_SESSION['bcd_csrf'], $_POST['_token']);
         if ($lockedOut) {
-            $remaining = (int) ceil(($lockoutWindow - ($now - ($_SESSION['bcd_fail_at'] ?? $now))) / 60);
+            $remaining = (int) ceil(($lockoutWindow - ($now - ($throttleRec['at'] ?? $now))) / 60);
             $authError = 'Too many failed attempts. Try again in '.max(1, $remaining).' minute(s).';
         } elseif (! $csrfValid) {
             $authError = 'Invalid or expired form submission. Please try again.';
         } elseif (hash_equals($envUser, (string) $_POST['username']) && password_verify($_POST['password'], $envPasswordHash)) {
             $_SESSION['bcd_authenticated'] = true;
             $_SESSION['bcd_auth_time'] = time();
-            $_SESSION['bcd_fail_count'] = 0;
+            bc_throttle_clear($throttleFile, $throttleIp);
             $authenticated = true;
         } else {
-            $_SESSION['bcd_fail_count'] = ($_SESSION['bcd_fail_count'] ?? 0) + 1;
-            $_SESSION['bcd_fail_at'] = $now;
+            bc_throttle_hit($throttleFile, $throttleIp, $now, $lockoutWindow, $lockoutMax);
             $authError = 'Invalid credentials.';
         }
     }
@@ -204,6 +347,34 @@ $_SESSION['bcd_csrf'] = bin2hex(random_bytes(32));
 
 $fixMessage = '';
 $fixSuccess = false;
+
+// --- Fix-action gate ---------------------------------------------------------
+// The fix actions below are privileged: they write .env, run `migrate --force`,
+// chmod/mkdir/symlink, and overwrite .htaccess. They are gated so this file is
+// never an ungoverned remote-exec path:
+//   • require an explicit opt-in flag — BCD_FIX_ENABLED=true in .env (so a stray
+//     APP_DEBUG=true on staging does not silently open write access),
+//   • disabled entirely in APP_ENV=production,
+//   • disabled while a kill-switch marker (storage/logs/.bcd-locked) is present,
+//     which `php artisan browser-console:disable` writes and `:enable`/`:remove`
+//     clears — so the one switch operators trust also neuters this file,
+//   • self-expiring — disabled once this file is older than N days, forcing a
+//     deliberate re-publish (php artisan browser-console:diagnose --refresh).
+// Read-only diagnostics (checks + opt-in boot test) remain available so the
+// page still fulfils its troubleshooting purpose.
+$bcdAppEnv = '';
+if (preg_match('/^APP_ENV=(.+)$/m', $envContent, $m)) {
+    $bcdAppEnv = trim(bc_parse_env_value($m[1]));
+}
+$bcdFixEnabled = (bool) preg_match('/^BCD_FIX_ENABLED=true$/mi', $envContent);
+
+$bcdSelfExpiryDays = 7;
+$bcdFileMtime = @filemtime(__FILE__) ?: time();
+$bcdExpired = (time() - $bcdFileMtime) > ($bcdSelfExpiryDays * 86400);
+
+$bcdLocked = $basePath && is_file($basePath.'/storage/logs/.bcd-locked');
+
+$fixActionsAllowed = $bcdFixEnabled && $bcdAppEnv !== 'production' && ! $bcdExpired && ! $bcdLocked;
 
 // --- Available fix actions ---
 $fixActions = [];
@@ -458,7 +629,17 @@ HTACCESS;
 // --- Process fix request (with CSRF verification) ---
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['fix'])) {
     $csrfValid = isset($_POST['_token'], $_SESSION['bcd_csrf']) && hash_equals($_SESSION['bcd_csrf'], $_POST['_token']);
-    if (! $csrfValid) {
+    if (! $fixActionsAllowed) {
+        if ($bcdExpired) {
+            $fixMessage = 'Fix actions are disabled: this diagnostics file has expired (older than '.$bcdSelfExpiryDays.' days). Re-publish it to re-enable: php artisan browser-console:diagnose --refresh';
+        } elseif ($bcdLocked) {
+            $fixMessage = 'Fix actions are disabled: the console kill switch is engaged (browser-console:disable). Run php artisan browser-console:enable to clear it.';
+        } else {
+            $fixMessage = 'Fix actions are disabled: set BCD_FIX_ENABLED=true in .env (and APP_ENV must not be production) to enable them. This page is read-only diagnostics here.';
+        }
+        $fixSuccess = false;
+        bc_audit_log($basePath, (string) $_POST['fix'], false, 'blocked: fix actions not allowed');
+    } elseif (! $csrfValid) {
         $fixMessage = 'Invalid or expired form submission. Please reload the page.';
         $fixSuccess = false;
     } elseif (isset($fixActions[$_POST['fix']])) {
@@ -470,6 +651,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['fix'])) {
             $fixMessage = 'Fix failed: '.$e->getMessage();
             $fixSuccess = false;
         }
+        bc_audit_log($basePath, $fixId, $fixSuccess, $fixMessage);
     }
     // Re-read .env after fix (it may have been created)
     if ($basePath && file_exists($basePath.'/.env')) {
@@ -739,8 +921,11 @@ if ($basePath && $envContent) {
             $dbPass = bc_parse_env_value($m[1]);
         }
 
-        $database[] = bc_check('DB_HOST', true, $dbHost.':'.$dbPort);
-        $database[] = bc_check('DB_DATABASE', ! empty($dbName), $dbName ?: 'NOT SET');
+        // Redact host/name — this page is reachable over the network, so the DB
+        // location is treated as sensitive. The connection test below still uses
+        // the real values; only the displayed detail is masked.
+        $database[] = bc_check('DB_HOST', true, 'configured (redacted)');
+        $database[] = bc_check('DB_DATABASE', ! empty($dbName), ! empty($dbName) ? 'configured (redacted)' : 'NOT SET');
 
         // Check PDO driver availability
         $pdoDriver = $dbConnection === 'pgsql' ? 'pgsql' : 'mysql';
@@ -1038,6 +1223,16 @@ $statusText = $totalFails === 0 ? 'ALL CHECKS PASSED' : "{$totalFails} ISSUE(S) 
         </div>
     <?php } ?>
 
+    <div class="flash flash-err">
+        Security: remove this file once you are done — it is a privileged endpoint NOT governed by the console kill switch.
+        Run: php artisan browser-console:diagnose --remove
+        <?php if (! $fixActionsAllowed) { ?>
+            <br>Write/fix actions are currently <strong>disabled</strong>
+            (<?= $bcdExpired ? 'file expired — re-publish to re-enable' : ($bcdLocked ? 'kill switch engaged — run browser-console:enable' : 'set BCD_FIX_ENABLED=true in .env (non-production)') ?>).
+            Diagnostics are read-only.
+        <?php } ?>
+    </div>
+
     <?php
     $sections = [
         'PHP Environment' => $php,
@@ -1064,7 +1259,7 @@ foreach ($sections as $title => $checks) {
                             <span class="fix">&rarr; <?= htmlspecialchars($c['fix']) ?></span>
                         <?php } ?>
                     </span>
-                    <?php if ($c['fixId'] && isset($fixActions[$c['fixId']])) { ?>
+                    <?php if ($fixActionsAllowed && $c['fixId'] && isset($fixActions[$c['fixId']])) { ?>
                         <form method="POST" style="display:inline; margin:0;">
                             <input type="hidden" name="_token" value="<?= $_SESSION['bcd_csrf'] ?>">
                             <input type="hidden" name="fix" value="<?= htmlspecialchars($c['fixId']) ?>">

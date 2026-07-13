@@ -115,6 +115,14 @@ class ConsoleDebug
     {
         $this->flushed = true;
 
+        // Opt-out gate: enabled everywhere by default so live deployments can be
+        // debugged, but operators can set BROWSER_CONSOLE_DEBUG=false to make the
+        // helper a no-op (no PII/secret payloads written to disk). Guarding here
+        // keeps the fluent chain (->label()->green()->table()) safe when off.
+        if (! config('browser-console.debug.enabled', true)) {
+            return;
+        }
+
         $entry = [
             'id' => Str::uuid()->toString(),
             'ts' => now()->format('Y-m-d H:i:s.u'),

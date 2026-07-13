@@ -31,6 +31,20 @@ it('mounts with default state', function () {
         ->assertSet('commandSearch', '');
 });
 
+it('does not build the command reference for unauthenticated visitors (BROWSERCON-5)', function () {
+    Livewire::test(BrowserConsole::class)
+        ->assertSet('isAuthenticated', false)
+        ->assertSet('commandGroups', []);
+});
+
+it('builds the command reference once authenticated (BROWSERCON-5)', function () {
+    actingAsConsole();
+
+    Livewire::test(BrowserConsole::class)
+        ->assertSet('isAuthenticated', true)
+        ->assertNotSet('commandGroups', []);
+});
+
 it('switches between modes', function () {
     actingAsConsole();
 
@@ -60,9 +74,17 @@ it('rejects invalid mode', function () {
 });
 
 it('fills command from reference panel', function () {
+    actingAsConsole();
+
     Livewire::test(BrowserConsole::class)
         ->call('fillCommand', 'migrate:status')
         ->assertSet('command', 'migrate:status');
+});
+
+it('rejects fillCommand when not authenticated', function () {
+    Livewire::test(BrowserConsole::class)
+        ->call('fillCommand', 'migrate:status')
+        ->assertForbidden();
 });
 
 it('clears history', function () {
@@ -89,10 +111,31 @@ it('does not run empty commands', function () {
         ->assertSet('history', []);
 });
 
+/**
+ * Invoke a now-protected reference-builder method for assertions. The methods
+ * are protected (CON-001) so unauthenticated clients cannot call them over the
+ * wire; a bound closure reaches them for in-process testing.
+ */
+function callProtected(BrowserConsole $component, string $method): mixed
+{
+    return (function () use ($method) {
+        return $this->{$method}();
+    })->call($component);
+}
+
+it('does not expose reference-builder methods to unauthenticated clients (CON-001)', function () {
+    foreach (['getCommandReference', 'getShellCommandReference', 'getDeploymentGuide', 'getFilteredCommandReference'] as $method) {
+        // Now protected: Livewire refuses to invoke it as a client action, so an
+        // unauthenticated caller can never reach the command/seeder inventory.
+        expect(fn () => Livewire::test(BrowserConsole::class)->call($method))
+            ->toThrow('not found on component');
+    }
+});
+
 it('returns command reference groups', function () {
     $component = new BrowserConsole;
     $component->mount();
-    $groups = $component->getCommandReference();
+    $groups = callProtected($component, 'getCommandReference');
 
     expect($groups)->toBeArray()
         ->and(array_keys($groups))->each->toBeString();
@@ -100,7 +143,7 @@ it('returns command reference groups', function () {
 
 it('returns shell command reference groups', function () {
     $component = new BrowserConsole;
-    $groups = $component->getShellCommandReference();
+    $groups = callProtected($component, 'getShellCommandReference');
 
     expect($groups)->toBeArray()
         ->and($groups)->toHaveKeys([__('Composer'), __('Git'), __('PHP Info'), __('System')]);
@@ -108,7 +151,7 @@ it('returns shell command reference groups', function () {
 
 it('returns deployment guide', function () {
     $component = new BrowserConsole;
-    $guide = $component->getDeploymentGuide();
+    $guide = callProtected($component, 'getDeploymentGuide');
 
     expect($guide)->toBeArray()
         ->and($guide)->toHaveKeys([__('Fresh Deployment'), __('Re-deployment / Update')]);
@@ -118,7 +161,7 @@ it('filters command reference by search term', function () {
     $component = new BrowserConsole;
     $component->mount();
     $component->commandSearch = 'migrate';
-    $filtered = $component->getFilteredCommandReference();
+    $filtered = callProtected($component, 'getFilteredCommandReference');
 
     expect($filtered)->toBeArray();
 
@@ -137,7 +180,7 @@ it('returns all commands when search is empty', function () {
     $component->mount();
     $component->commandSearch = '';
 
-    $all = $component->getFilteredCommandReference();
+    $all = callProtected($component, 'getFilteredCommandReference');
 
     expect($all)->toBe($component->commandGroups);
 });
@@ -258,4 +301,32 @@ it('rejects downloadLog when not authenticated', function () {
     Livewire::test(BrowserConsole::class)
         ->call('downloadLog')
         ->assertForbidden();
+});
+
+it('notifies instead of a silent 204 when there is no log to download (CON-010)', function () {
+    $logPath = storage_path('logs/laravel.log');
+    if (File::exists($logPath)) {
+        File::delete($logPath);
+    }
+
+    actingAsConsole();
+
+    Livewire::test(BrowserConsole::class)
+        ->call('downloadLog')
+        ->assertDispatched('console-notice');
+});
+
+it('does not truncate an artisan command whose argument contains "artisan " (CON-007)', function () {
+    actingAsConsole();
+
+    // Old code used Str::after($input, 'artisan '), which would truncate this to
+    // just "foo". The prefix is only stripped at position 0 now.
+    $component = Livewire::test(BrowserConsole::class)
+        ->set('command', 'route:list --path=artisan foo')
+        ->call('runCommand');
+
+    $history = $component->get('history');
+
+    expect($history)->not->toBeEmpty()
+        ->and($history[0]['command'])->toBe('route:list --path=artisan foo');
 });

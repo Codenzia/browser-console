@@ -39,7 +39,9 @@ class BrowserConsoleServiceProvider extends PackageServiceProvider
                         $cmd->line('  deployment issues when Laravel cannot boot.');
                         $cmd->line('  It is protected by your BROWSER_CONSOLE_PASSWORD.');
                         $cmd->warn('  It exposes server info (PHP version, extensions, permissions).');
-                        $cmd->warn('  It is NOT governed by the kill switch — remove it before production.');
+                        $cmd->error('  It is NOT governed by the kill switch — remove it before production.');
+                        $cmd->line('  Its write/fix actions are disabled in production and unless APP_DEBUG=true,');
+                        $cmd->line('  and self-expire 7 days after publish. Remove: php artisan browser-console:diagnose --remove');
                         $cmd->newLine();
 
                         if ($cmd->confirm('Publish the diagnostics page to public/bcd.php?', false)) {

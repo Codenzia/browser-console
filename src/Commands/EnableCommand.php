@@ -31,6 +31,10 @@ class EnableCommand extends Command
             return self::FAILURE;
         }
 
+        // Clear the bcd.php fix-action lock marker that :disable may have written,
+        // re-enabling its write/fix actions (still subject to BCD_FIX_ENABLED).
+        $this->unlockBcdFixActions();
+
         $this->newLine();
 
         if ($mode === 'on') {
@@ -52,6 +56,19 @@ class EnableCommand extends Command
         $this->newLine();
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Remove the kill-switch marker so public/bcd.php's fix actions are no
+     * longer force-disabled (they remain gated behind BCD_FIX_ENABLED).
+     */
+    private function unlockBcdFixActions(): void
+    {
+        $marker = storage_path('logs/.bcd-locked');
+
+        if (is_file($marker)) {
+            @unlink($marker);
+        }
     }
 
     private function resolveTtl(): ?int
